@@ -21,6 +21,11 @@ public class GlobalExceptionHandler {
         return errorResponse(HttpStatus.NOT_FOUND, ex.getMessage());
     }
 
+    @ExceptionHandler(MissingIdempotencyKeyException.class)
+    public ResponseEntity<Map<String, Object>> handleMissingIdempotencyKey(MissingIdempotencyKeyException ex) {
+        return errorResponse(HttpStatus.BAD_REQUEST, ex.getMessage());
+    }
+
     @ExceptionHandler(ExchangeRateUnavailableException.class)
     public ResponseEntity<Map<String, Object>> handleExchangeRateUnavailable(ExchangeRateUnavailableException ex) {
         return errorResponse(HttpStatus.UNPROCESSABLE_ENTITY, ex.getMessage());

@@ -26,20 +26,35 @@ public class PurchaseTransactionService {
     }
 
     /**
-     * Validates and persists a purchase transaction.
-     * The purchase amount is stored rounded to the nearest cent.
+     * Stores a purchase transaction idempotently.
+     *
+     * If a transaction with the given idempotencyKey already exists, the original
+     * stored response is returned without creating a duplicate. Otherwise a new
+     * transaction is persisted and returned.
+     *
+     * @param idempotencyKey client-supplied unique key for this request
+     * @param request        transaction details
+     * @return the stored (or previously stored) transaction; boolean indicates if newly created
      */
     @Transactional
-    public TransactionResponse createTransaction(CreateTransactionRequest request) {
-        PurchaseTransaction transaction = new PurchaseTransaction();
-        transaction.setDescription(request.getDescription());
-        transaction.setTransactionDate(request.getTransactionDate());
-        // Enforce rounding to nearest cent on store
-        transaction.setPurchaseAmount(
-                request.getPurchaseAmount().setScale(2, RoundingMode.HALF_UP));
+    public IdempotentResult<TransactionResponse> createTransaction(String idempotencyKey,
+                                                                    CreateTransactionRequest request) {
+        // Check for an existing transaction with this idempotency key
+        return repository.findByIdempotencyKey(idempotencyKey)
+                .map(existing -> IdempotentResult.existing(toResponse(existing)))
+                .orElseGet(() -> {
+                    PurchaseTransaction transaction = new PurchaseTransaction();
+                    transaction.setIdempotencyKey(idempotencyKey);
+                    transaction.setDescription(request.getDescription());
+                    transaction.setTransactionDate(request.getTransactionDate());
+                    // Convert cents to dollars: 9999 → 99.99
+                    BigDecimal amountInDollars = BigDecimal.valueOf(request.getPurchaseAmountCents())
+                            .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
+                    transaction.setPurchaseAmount(amountInDollars);
 
-        PurchaseTransaction saved = repository.save(transaction);
-        return toResponse(saved);
+                    PurchaseTransaction saved = repository.save(transaction);
+                    return IdempotentResult.created(toResponse(saved));
+                });
     }
 
     /**
@@ -79,5 +94,13 @@ public class PurchaseTransactionService {
                 transaction.getTransactionDate(),
                 transaction.getPurchaseAmount()
         );
+    }
+
+    /**
+     * Wraps a service result to indicate whether it was newly created or already existed.
+     */
+    public record IdempotentResult<T>(T value, boolean created) {
+        public static <T> IdempotentResult<T> created(T value) { return new IdempotentResult<>(value, true); }
+        public static <T> IdempotentResult<T> existing(T value) { return new IdempotentResult<>(value, false); }
     }
 }

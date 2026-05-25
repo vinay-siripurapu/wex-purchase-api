@@ -2,7 +2,6 @@ package com.wex.purchase.dto;
 
 import jakarta.validation.constraints.*;
 
-import java.math.BigDecimal;
 import java.time.LocalDate;
 
 public class CreateTransactionRequest {
@@ -14,10 +13,13 @@ public class CreateTransactionRequest {
     @NotNull(message = "Transaction date is required")
     private LocalDate transactionDate;
 
-    @NotNull(message = "Purchase amount is required")
-    @DecimalMin(value = "0.01", message = "Purchase amount must be a positive value")
-    @Digits(integer = 15, fraction = 2, message = "Purchase amount must be a valid monetary value rounded to the nearest cent")
-    private BigDecimal purchaseAmount;
+    /**
+     * Purchase amount in cents (last 2 digits are cents).
+     * e.g. 9999 = $99.99, 100 = $1.00, 0 = $0.00
+     */
+    @NotNull(message = "Purchase amount in cents is required")
+    @Min(value = 0, message = "Purchase amount in cents must not be negative")
+    private Long purchaseAmountCents;
 
     // --- Getters & Setters ---
 
@@ -27,6 +29,6 @@ public class CreateTransactionRequest {
     public LocalDate getTransactionDate() { return transactionDate; }
     public void setTransactionDate(LocalDate transactionDate) { this.transactionDate = transactionDate; }
 
-    public BigDecimal getPurchaseAmount() { return purchaseAmount; }
-    public void setPurchaseAmount(BigDecimal purchaseAmount) { this.purchaseAmount = purchaseAmount; }
+    public Long getPurchaseAmountCents() { return purchaseAmountCents; }
+    public void setPurchaseAmountCents(Long purchaseAmountCents) { this.purchaseAmountCents = purchaseAmountCents; }
 }
