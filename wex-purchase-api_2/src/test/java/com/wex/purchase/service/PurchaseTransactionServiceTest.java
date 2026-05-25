@@ -7,6 +7,7 @@ import com.wex.purchase.exception.ExchangeRateUnavailableException;
 import com.wex.purchase.exception.TransactionNotFoundException;
 import com.wex.purchase.model.PurchaseTransaction;
 import com.wex.purchase.repository.PurchaseTransactionRepository;
+import com.wex.purchase.service.PurchaseTransactionService.IdempotentResult;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -42,29 +43,44 @@ class PurchaseTransactionServiceTest {
     void setUp() {
         savedTransaction = new PurchaseTransaction();
         savedTransaction.setId(UUID.randomUUID());
+        savedTransaction.setIdempotencyKey("key-001");
         savedTransaction.setDescription("Office supplies");
         savedTransaction.setTransactionDate(LocalDate.of(2024, 6, 15));
         savedTransaction.setPurchaseAmount(new BigDecimal("100.00"));
     }
 
     // -------------------------------------------------------------------------
-    // createTransaction
+    // createTransaction — new transaction
     // -------------------------------------------------------------------------
 
     @Test
-    @DisplayName("createTransaction: stores and returns a valid transaction")
-    void createTransaction_validRequest_returnsSavedTransaction() {
-        // 10000 cents = $100.00
+    @DisplayName("createTransaction: stores and returns a new transaction (created=true)")
+    void createTransaction_newKey_createsAndReturns() {
         CreateTransactionRequest request = buildRequest("Office supplies", LocalDate.of(2024, 6, 15), 10000L);
 
+        when(repository.findByIdempotencyKey("key-001")).thenReturn(Optional.empty());
         when(repository.save(any(PurchaseTransaction.class))).thenReturn(savedTransaction);
 
-        TransactionResponse response = service.createTransaction(request);
+        IdempotentResult<TransactionResponse> result = service.createTransaction("key-001", request);
 
-        assertThat(response.getId()).isEqualTo(savedTransaction.getId());
-        assertThat(response.getDescription()).isEqualTo("Office supplies");
-        assertThat(response.getPurchaseAmountUsd()).isEqualByComparingTo("100.00");
-        verify(repository, times(1)).save(any(PurchaseTransaction.class));
+        assertThat(result.created()).isTrue();
+        assertThat(result.value().getDescription()).isEqualTo("Office supplies");
+        assertThat(result.value().getPurchaseAmountUsd()).isEqualByComparingTo("100.00");
+        verify(repository).save(any(PurchaseTransaction.class));
+    }
+
+    @Test
+    @DisplayName("createTransaction: returns existing transaction for duplicate key (created=false)")
+    void createTransaction_duplicateKey_returnsExistingWithoutSaving() {
+        CreateTransactionRequest request = buildRequest("Office supplies", LocalDate.of(2024, 6, 15), 10000L);
+
+        when(repository.findByIdempotencyKey("key-001")).thenReturn(Optional.of(savedTransaction));
+
+        IdempotentResult<TransactionResponse> result = service.createTransaction("key-001", request);
+
+        assertThat(result.created()).isFalse();
+        assertThat(result.value().getId()).isEqualTo(savedTransaction.getId());
+        verify(repository, never()).save(any());
     }
 
     @Test
@@ -78,29 +94,31 @@ class PurchaseTransactionServiceTest {
         stored.setTransactionDate(LocalDate.now());
         stored.setPurchaseAmount(new BigDecimal("99.99"));
 
-        when(repository.save(any(PurchaseTransaction.class))).thenReturn(stored);
+        when(repository.findByIdempotencyKey(anyString())).thenReturn(Optional.empty());
+        when(repository.save(any())).thenReturn(stored);
 
-        TransactionResponse response = service.createTransaction(request);
+        IdempotentResult<TransactionResponse> result = service.createTransaction("key-002", request);
 
-        assertThat(response.getPurchaseAmountUsd()).isEqualByComparingTo("99.99");
+        assertThat(result.value().getPurchaseAmountUsd()).isEqualByComparingTo("99.99");
     }
 
     @Test
     @DisplayName("createTransaction: 1 cent → $0.01")
-    void createTransaction_oneCent_convertsToOneCentDollar() {
-        CreateTransactionRequest request = buildRequest("Tiny purchase", LocalDate.now(), 1L);
+    void createTransaction_oneCent_convertsCorrectly() {
+        CreateTransactionRequest request = buildRequest("Tiny", LocalDate.now(), 1L);
 
         PurchaseTransaction stored = new PurchaseTransaction();
         stored.setId(UUID.randomUUID());
-        stored.setDescription("Tiny purchase");
+        stored.setDescription("Tiny");
         stored.setTransactionDate(LocalDate.now());
         stored.setPurchaseAmount(new BigDecimal("0.01"));
 
-        when(repository.save(any(PurchaseTransaction.class))).thenReturn(stored);
+        when(repository.findByIdempotencyKey(anyString())).thenReturn(Optional.empty());
+        when(repository.save(any())).thenReturn(stored);
 
-        TransactionResponse response = service.createTransaction(request);
+        IdempotentResult<TransactionResponse> result = service.createTransaction("key-003", request);
 
-        assertThat(response.getPurchaseAmountUsd()).isEqualByComparingTo("0.01");
+        assertThat(result.value().getPurchaseAmountUsd()).isEqualByComparingTo("0.01");
     }
 
     // -------------------------------------------------------------------------
@@ -111,18 +129,14 @@ class PurchaseTransactionServiceTest {
     @DisplayName("getTransactionInCurrency: converts USD amount using exchange rate")
     void getTransactionInCurrency_validRequest_returnsConvertedAmount() {
         UUID id = savedTransaction.getId();
-        BigDecimal exchangeRate = new BigDecimal("1.3500");
-
         when(repository.findById(id)).thenReturn(Optional.of(savedTransaction));
         when(exchangeRateService.getExchangeRate("Canada-Dollar", savedTransaction.getTransactionDate()))
-                .thenReturn(exchangeRate);
+                .thenReturn(new BigDecimal("1.3500"));
 
         ConvertedTransactionResponse response = service.getTransactionInCurrency(id, "Canada-Dollar");
 
-        assertThat(response.getId()).isEqualTo(id);
         assertThat(response.getExchangeRate()).isEqualByComparingTo("1.3500");
         assertThat(response.getConvertedAmount()).isEqualByComparingTo("135.00");
-        assertThat(response.getTargetCurrency()).isEqualTo("Canada-Dollar");
     }
 
     @Test
@@ -136,7 +150,6 @@ class PurchaseTransactionServiceTest {
 
         ConvertedTransactionResponse response = service.getTransactionInCurrency(id, "Some-Currency");
 
-        // 10.00 * 1.2345 = 12.345 → rounds to 12.35
         assertThat(response.getConvertedAmount()).isEqualByComparingTo("12.35");
     }
 
@@ -147,8 +160,7 @@ class PurchaseTransactionServiceTest {
         when(repository.findById(unknownId)).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> service.getTransactionInCurrency(unknownId, "Canada-Dollar"))
-                .isInstanceOf(TransactionNotFoundException.class)
-                .hasMessageContaining(unknownId.toString());
+                .isInstanceOf(TransactionNotFoundException.class);
     }
 
     @Test

@@ -46,7 +46,7 @@ class PurchaseTransactionControllerTest {
     @Test
     @DisplayName("POST /api/v1/transactions - 201 Created with valid body")
     void createTransaction_validBody_returns201() throws Exception {
-        CreateTransactionRequest request = buildCreateRequest("Office supplies", "2024-06-15", "99.99");
+        CreateTransactionRequest request = buildCreateRequest("Office supplies", "2024-06-15", 9999L);
         TransactionResponse stubResponse = new TransactionResponse(
                 TRANSACTION_ID, "Office supplies", LocalDate.of(2024, 6, 15), new BigDecimal("99.99"));
 
@@ -64,7 +64,7 @@ class PurchaseTransactionControllerTest {
     @Test
     @DisplayName("POST /api/v1/transactions - 400 when description is blank")
     void createTransaction_blankDescription_returns400() throws Exception {
-        CreateTransactionRequest request = buildCreateRequest("", "2024-06-15", "99.99");
+        CreateTransactionRequest request = buildCreateRequest("", "2024-06-15", 9999L);
 
         mockMvc.perform(post("/api/v1/transactions")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -76,8 +76,7 @@ class PurchaseTransactionControllerTest {
     @Test
     @DisplayName("POST /api/v1/transactions - 400 when description exceeds 50 chars")
     void createTransaction_descriptionTooLong_returns400() throws Exception {
-        CreateTransactionRequest request = buildCreateRequest(
-                "A".repeat(51), "2024-06-15", "99.99");
+        CreateTransactionRequest request = buildCreateRequest("A".repeat(51), "2024-06-15", 9999L);
 
         mockMvc.perform(post("/api/v1/transactions")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -86,20 +85,20 @@ class PurchaseTransactionControllerTest {
     }
 
     @Test
-    @DisplayName("POST /api/v1/transactions - 400 when purchase amount is negative")
-    void createTransaction_negativeAmount_returns400() throws Exception {
-        CreateTransactionRequest request = buildCreateRequest("Refund", "2024-06-15", "-10.00");
-
-        mockMvc.perform(post("/api/v1/transactions")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(request)))
-                .andExpect(status().isBadRequest());
-    }
-
-    @Test
-    @DisplayName("POST /api/v1/transactions - 400 when purchase amount is zero")
+    @DisplayName("POST /api/v1/transactions - 400 when purchaseAmountCents is zero")
     void createTransaction_zeroAmount_returns400() throws Exception {
-        CreateTransactionRequest request = buildCreateRequest("Zero", "2024-06-15", "0.00");
+        CreateTransactionRequest request = buildCreateRequest("Zero", "2024-06-15", 0L);
+
+        mockMvc.perform(post("/api/v1/transactions")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    @DisplayName("POST /api/v1/transactions - 400 when purchaseAmountCents is negative")
+    void createTransaction_negativeAmount_returns400() throws Exception {
+        CreateTransactionRequest request = buildCreateRequest("Negative", "2024-06-15", -100L);
 
         mockMvc.perform(post("/api/v1/transactions")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -113,7 +112,7 @@ class PurchaseTransactionControllerTest {
         String body = """
                 {
                   "description": "Test",
-                  "purchaseAmount": 10.00
+                  "purchaseAmountCents": 1000
                 }
                 """;
 
@@ -180,13 +179,13 @@ class PurchaseTransactionControllerTest {
     // Helpers
     // -------------------------------------------------------------------------
 
-    private CreateTransactionRequest buildCreateRequest(String description, String date, String amount) {
+    private CreateTransactionRequest buildCreateRequest(String description, String date, Long amountCents) {
         CreateTransactionRequest req = new CreateTransactionRequest();
         req.setDescription(description);
         if (date != null) {
             req.setTransactionDate(LocalDate.parse(date));
         }
-        req.setPurchaseAmount(new BigDecimal(amount));
+        req.setPurchaseAmountCents(amountCents);
         return req;
     }
 }

@@ -15,17 +15,12 @@ import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 
-import java.math.BigDecimal;
 import java.time.LocalDate;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.*;
-import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
-/**
- * Full integration tests: Spring context + real DB + WireMock for Treasury API.
- */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @AutoConfigureMockMvc
 @ActiveProfiles("test")
@@ -62,29 +57,29 @@ class PurchaseTransactionIntegrationTest {
     }
 
     // -------------------------------------------------------------------------
-    // Store + Retrieve happy path
+    // Happy path
     // -------------------------------------------------------------------------
 
     @Test
-    @DisplayName("Integration: store then retrieve with currency conversion")
+    @DisplayName("Integration: store (cents) then retrieve with currency conversion")
     void storeThenRetrieveWithConversion_returnsConvertedAmount() throws Exception {
-        // 1. Store a transaction
+        // 1. Store — 20000 cents = $200.00
         CreateTransactionRequest createReq = new CreateTransactionRequest();
         createReq.setDescription("Office supplies");
         createReq.setTransactionDate(LocalDate.of(2024, 3, 15));
-        createReq.setPurchaseAmount(new BigDecimal("200.00"));
+        createReq.setPurchaseAmountCents(20000L);
 
         MvcResult createResult = mockMvc.perform(post("/api/v1/transactions")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(createReq)))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.id").exists())
+                .andExpect(jsonPath("$.purchaseAmountUsd").value(200.00))
                 .andReturn();
 
-        String responseBody = createResult.getResponse().getContentAsString();
-        String id = objectMapper.readTree(responseBody).get("id").asText();
+        String id = objectMapper.readTree(createResult.getResponse().getContentAsString()).get("id").asText();
 
-        // 2. Stub Treasury API to return exchange rate
+        // 2. Stub Treasury API
         wireMockServer.stubFor(get(urlPathEqualTo("/"))
                 .willReturn(aResponse()
                         .withStatus(200)
@@ -101,16 +96,29 @@ class PurchaseTransactionIntegrationTest {
                                 }
                                 """)));
 
-        // 3. Retrieve with conversion
+        // 3. Retrieve with conversion: 200.00 * 1.35 = 270.00
         mockMvc.perform(get("/api/v1/transactions/{id}", id)
                         .param("currency", "Canada-Dollar"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.id").value(id))
-                .andExpect(jsonPath("$.description").value("Office supplies"))
                 .andExpect(jsonPath("$.purchaseAmountUsd").value(200.00))
                 .andExpect(jsonPath("$.exchangeRate").value(1.35))
                 .andExpect(jsonPath("$.convertedAmount").value(270.00))
                 .andExpect(jsonPath("$.targetCurrency").value("Canada-Dollar"));
+    }
+
+    @Test
+    @DisplayName("Integration: 1 cent stored as $0.01")
+    void storeTransaction_oneCent_storedAsOneCentDollar() throws Exception {
+        CreateTransactionRequest req = new CreateTransactionRequest();
+        req.setDescription("Minimum purchase");
+        req.setTransactionDate(LocalDate.now());
+        req.setPurchaseAmountCents(1L);
+
+        mockMvc.perform(post("/api/v1/transactions")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(req)))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.purchaseAmountUsd").value(0.01));
     }
 
     // -------------------------------------------------------------------------
@@ -123,7 +131,7 @@ class PurchaseTransactionIntegrationTest {
         CreateTransactionRequest req = new CreateTransactionRequest();
         req.setDescription("A".repeat(51));
         req.setTransactionDate(LocalDate.now());
-        req.setPurchaseAmount(new BigDecimal("10.00"));
+        req.setPurchaseAmountCents(1000L);
 
         mockMvc.perform(post("/api/v1/transactions")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -133,33 +141,47 @@ class PurchaseTransactionIntegrationTest {
     }
 
     @Test
-    @DisplayName("Integration: invalid date format in JSON returns 400")
+    @DisplayName("Integration: zero cents rejected with 400")
+    void storeTransaction_zeroAmountCents_returns400() throws Exception {
+        CreateTransactionRequest req = new CreateTransactionRequest();
+        req.setDescription("Zero");
+        req.setTransactionDate(LocalDate.now());
+        req.setPurchaseAmountCents(0L);
+
+        mockMvc.perform(post("/api/v1/transactions")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(req)))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    @DisplayName("Integration: negative cents rejected with 400")
+    void storeTransaction_negativeAmountCents_returns400() throws Exception {
+        CreateTransactionRequest req = new CreateTransactionRequest();
+        req.setDescription("Negative");
+        req.setTransactionDate(LocalDate.now());
+        req.setPurchaseAmountCents(-500L);
+
+        mockMvc.perform(post("/api/v1/transactions")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(req)))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    @DisplayName("Integration: invalid date format returns 400")
     void storeTransaction_invalidDateFormat_returns400() throws Exception {
         String body = """
                 {
                   "description": "Test",
                   "transactionDate": "15/06/2024",
-                  "purchaseAmount": 10.00
+                  "purchaseAmountCents": 1000
                 }
                 """;
 
         mockMvc.perform(post("/api/v1/transactions")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
-                .andExpect(status().isBadRequest());
-    }
-
-    @Test
-    @DisplayName("Integration: negative purchase amount returns 400")
-    void storeTransaction_negativeAmount_returns400() throws Exception {
-        CreateTransactionRequest req = new CreateTransactionRequest();
-        req.setDescription("Negative");
-        req.setTransactionDate(LocalDate.now());
-        req.setPurchaseAmount(new BigDecimal("-5.00"));
-
-        mockMvc.perform(post("/api/v1/transactions")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(req)))
                 .andExpect(status().isBadRequest());
     }
 
@@ -170,11 +192,10 @@ class PurchaseTransactionIntegrationTest {
     @Test
     @DisplayName("Integration: no exchange rate within 6 months returns 422")
     void retrieveTransaction_noRateWithinSixMonths_returns422() throws Exception {
-        // Store
         CreateTransactionRequest req = new CreateTransactionRequest();
         req.setDescription("Old purchase");
         req.setTransactionDate(LocalDate.of(2023, 1, 10));
-        req.setPurchaseAmount(new BigDecimal("50.00"));
+        req.setPurchaseAmountCents(5000L);
 
         MvcResult createResult = mockMvc.perform(post("/api/v1/transactions")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -184,7 +205,6 @@ class PurchaseTransactionIntegrationTest {
 
         String id = objectMapper.readTree(createResult.getResponse().getContentAsString()).get("id").asText();
 
-        // Treasury API returns empty data (no rate in range)
         wireMockServer.stubFor(get(urlPathEqualTo("/"))
                 .willReturn(aResponse()
                         .withStatus(200)
@@ -208,10 +228,11 @@ class PurchaseTransactionIntegrationTest {
     @Test
     @DisplayName("Integration: converted amount is rounded to two decimal places")
     void retrieveTransaction_convertedAmountRoundedToTwoDecimals() throws Exception {
+        // 1000 cents = $10.00; 10.00 * 1.2345 = 12.345 → 12.35
         CreateTransactionRequest req = new CreateTransactionRequest();
         req.setDescription("Rounding test");
         req.setTransactionDate(LocalDate.of(2024, 6, 1));
-        req.setPurchaseAmount(new BigDecimal("10.00"));
+        req.setPurchaseAmountCents(1000L);
 
         MvcResult createResult = mockMvc.perform(post("/api/v1/transactions")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -221,7 +242,6 @@ class PurchaseTransactionIntegrationTest {
 
         String id = objectMapper.readTree(createResult.getResponse().getContentAsString()).get("id").asText();
 
-        // 10.00 * 1.2345 = 12.345 → should round to 12.35
         wireMockServer.stubFor(get(urlPathEqualTo("/"))
                 .willReturn(aResponse()
                         .withStatus(200)

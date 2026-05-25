@@ -15,10 +15,10 @@ public class CreateTransactionRequest {
 
     /**
      * Purchase amount in cents (last 2 digits are cents).
-     * e.g. 9999 = $99.99, 100 = $1.00
+     * e.g. 9999 = $99.99, 100 = $1.00, 0 = $0.00
      */
     @NotNull(message = "Purchase amount in cents is required")
-    @Min(value = 1, message = "Purchase amount must be a positive value (minimum 1 cent)")
+    @Min(value = 0, message = "Purchase amount in cents must not be negative")
     private Long purchaseAmountCents;
 
     // --- Getters & Setters ---
