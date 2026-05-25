@@ -31,10 +31,10 @@
 
 The WEX Purchase Transaction API is a RESTful backend service that allows clients to:
 
-1. **Store** a purchase transaction in USD.
+1. **Store** a purchase transaction in USD — idempotently, preventing duplicates via a client-supplied `Idempotency-Key` header.
 2. **Retrieve** a stored transaction with the purchase amount converted to a target currency, using exchange rates published by the US Treasury Reporting Rates of Exchange API.
 
-The service is built for production readiness: validated inputs, structured error responses, full automated test coverage, and an externally configurable datasource and Treasury API URL.
+The service is built for production readiness: validated inputs, idempotent writes, structured error responses, full automated test coverage, and an externally configurable datasource and Treasury API URL.
 
 ---
 
@@ -44,6 +44,7 @@ The service is built for production readiness: validated inputs, structured erro
 
 | Field | Type | Constraint |
 |---|---|---|
+| `Idempotency-Key` | Header (String) | Required, max 64 characters; prevents duplicate transactions |
 | `description` | String | Required, max 50 characters |
 | `transactionDate` | Date | Required, ISO format `YYYY-MM-DD` |
 | `purchaseAmountCents` | Long | Required, non-negative integer (cents); e.g. `9999` = $99.99, `0` = $0.00 |
@@ -77,7 +78,7 @@ Client
 │  └────────────────┬─────────────────┘   │
 │                   │                      │
 │  ┌────────────────▼─────────────────┐   │
-│  │   PurchaseTransactionService     │   │  ← Business logic, orchestration
+│  │   PurchaseTransactionService     │   │  ← Business logic, idempotency, orchestration
 │  └──────┬─────────────────┬─────────┘   │
 │         │                 │              │
 │  ┌──────▼──────┐  ┌───────▼──────────┐  │
@@ -96,11 +97,11 @@ Client
 
 | Layer | Class | Responsibility |
 |---|---|---|
-| Controller | `PurchaseTransactionController` | HTTP request/response mapping, input validation delegation |
-| Service | `PurchaseTransactionService` | Business logic: cents→dollars conversion, orchestrate store/retrieve |
+| Controller | `PurchaseTransactionController` | HTTP request/response mapping, `Idempotency-Key` header validation, status code selection (201 vs 200) |
+| Service | `PurchaseTransactionService` | Business logic: idempotency check, cents→dollars conversion, orchestrate store/retrieve |
 | Service | `TreasuryExchangeRateService` | Build Treasury API query, parse response, enforce 6-month window |
-| Repository | `PurchaseTransactionRepository` | JPA CRUD operations against the database |
-| Model | `PurchaseTransaction` | JPA entity; UUID PK auto-generated via `@PrePersist` |
+| Repository | `PurchaseTransactionRepository` | JPA CRUD + `findByIdempotencyKey` lookup |
+| Model | `PurchaseTransaction` | JPA entity; UUID PK auto-generated via `@PrePersist`; unique constraint on `idempotency_key` |
 | DTOs | `CreateTransactionRequest`, `TransactionResponse`, `ConvertedTransactionResponse` | API contracts; decouple transport from domain |
 | Exception | `GlobalExceptionHandler` | Centralised structured error responses |
 
@@ -145,8 +146,9 @@ wex-purchase-api/
     │   │   │   └── TreasuryExchangeRateRecord.java   # Treasury API record
     │   │   ├── exception/
     │   │   │   ├── GlobalExceptionHandler.java
-    │   │   │   ├── TransactionNotFoundException.java
-    │   │   │   └── ExchangeRateUnavailableException.java
+    │   │   │   ├── ExchangeRateUnavailableException.java
+    │   │   │   ├── MissingIdempotencyKeyException.java
+    │   │   │   └── TransactionNotFoundException.java
     │   │   ├── model/
     │   │   │   └── PurchaseTransaction.java          # JPA entity
     │   │   ├── repository/
@@ -179,13 +181,15 @@ wex-purchase-api/
 
 | Column | Java Type | DB Type | Constraints |
 |---|---|---|---|
-| `id` | `UUID` | `UUID` / `VARCHAR(36)` | Primary key, not null, immutable |
+| `id` | `UUID` | `VARCHAR(36)` | Primary key, not null, immutable |
+| `idempotency_key` | `String` | `VARCHAR(64)` | Not null, unique, immutable |
 | `description` | `String` | `VARCHAR(50)` | Not null, max 50 chars |
 | `transaction_date` | `LocalDate` | `DATE` | Not null |
 | `purchase_amount` | `BigDecimal` | `DECIMAL(17, 2)` | Not null, stored in dollars |
 
 **Notes:**
 - `id` is generated in Java via `UUID.randomUUID()` inside `@PrePersist`, not by the database. This makes IDs predictable in tests and portable across DB engines.
+- `idempotency_key` has a `UNIQUE` database constraint (`uc_idempotency_key`) enforcing deduplication at the storage level as a safety net, in addition to the application-level check.
 - `purchase_amount` is always stored in **US dollars** with exactly 2 decimal places, regardless of how the client submits the value.
 - The `purchaseAmountCents` field exists only in the request DTO; it is converted to dollars before persistence.
 
@@ -214,11 +218,14 @@ http://localhost:8080/api/v1
 
 ### POST `/api/v1/transactions` — Store a Transaction
 
+This endpoint is **idempotent**. Clients must supply an `Idempotency-Key` header with a unique value (e.g. a UUID) per intended transaction. Repeating the same key returns the original stored response without creating a duplicate.
+
 **Request**
 
 ```http
 POST /api/v1/transactions
 Content-Type: application/json
+Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
 
 {
   "description": "Office supplies",
@@ -227,13 +234,21 @@ Content-Type: application/json
 }
 ```
 
+**Headers**
+
+| Header | Required | Rules |
+|---|---|---|
+| `Idempotency-Key` | Yes | Max 64 characters; unique per intended transaction (UUID recommended) |
+
+**Body Fields**
+
 | Field | Type | Required | Rules |
 |---|---|---|---|
 | `description` | `string` | Yes | Max 50 characters, not blank |
 | `transactionDate` | `string` | Yes | ISO date format `YYYY-MM-DD` |
 | `purchaseAmountCents` | `long` | Yes | Non-negative integer; `0` = $0.00 |
 
-**Response — 201 Created**
+**Response — 201 Created** *(new transaction)*
 
 ```json
 {
@@ -244,7 +259,11 @@ Content-Type: application/json
 }
 ```
 
-| Field | Description |
+**Response — 200 OK** *(duplicate key — original transaction replayed)*
+
+Same response body as 201, but HTTP status is 200 to signal the transaction already existed. No new record is created.
+
+| Response Field | Description |
 |---|---|
 | `id` | Auto-generated UUID; use this to retrieve the transaction |
 | `description` | Echo of the submitted description |
@@ -308,18 +327,23 @@ GET https://api.fiscaldata.treasury.gov/services/api/v1/accounting/od/rates_of_e
 
 ## 8. Business Logic
 
-### Storing a Transaction
+### Storing a Transaction (Idempotent)
 
 ```
-1. Receive POST body
-2. Validate fields (Jakarta Validation)
+1. Receive POST body + Idempotency-Key header
+2. Validate Idempotency-Key:
+   - missing or blank → 400 MissingIdempotencyKeyException
+   - length > 64 chars → 400 MissingIdempotencyKeyException
+3. Validate body fields (Jakarta Validation):
    - description: not blank, ≤ 50 chars
    - transactionDate: not null, valid ISO date
    - purchaseAmountCents: not null, ≥ 0
-3. Convert cents to dollars:
+4. Look up existing transaction by Idempotency-Key:
+   └── found → return existing TransactionResponse with HTTP 200 (no DB write)
+5. Convert cents to dollars:
       dollars = BigDecimal.valueOf(cents).divide(100, 2, HALF_UP)
-4. Persist PurchaseTransaction entity (UUID auto-assigned)
-5. Return 201 with TransactionResponse
+6. Persist new PurchaseTransaction entity (UUID auto-assigned)
+7. Return 201 Created with TransactionResponse
 ```
 
 ### Retrieving with Currency Conversion
@@ -342,6 +366,28 @@ GET https://api.fiscaldata.treasury.gov/services/api/v1/accounting/od/rates_of_e
       converted = converted.setScale(2, HALF_UP)
 
 4. Return 200 with ConvertedTransactionResponse
+```
+
+### Idempotency Flow
+
+```
+First request (new key):
+  Client → POST /transactions (Idempotency-Key: abc-123)
+         → DB lookup: not found
+         → insert new row
+         ← 201 Created { id: "uuid-1", ... }
+
+Duplicate request (same key):
+  Client → POST /transactions (Idempotency-Key: abc-123)
+         → DB lookup: found existing row
+         → no insert
+         ← 200 OK { id: "uuid-1", ... }   ← same id, same data
+
+New transaction (different key):
+  Client → POST /transactions (Idempotency-Key: xyz-999)
+         → DB lookup: not found
+         → insert new row
+         ← 201 Created { id: "uuid-2", ... }
 ```
 
 ### Currency Conversion Example
@@ -418,7 +464,14 @@ https://api.fiscaldata.treasury.gov/services/api/v1/accounting/od/rates_of_excha
 
 ## 10. Validation Rules
 
-### `CreateTransactionRequest`
+### `Idempotency-Key` Header
+
+| Rule | HTTP on failure |
+|---|---|
+| Header must be present and not blank | 400 |
+| Value must not exceed 64 characters | 400 |
+
+### `CreateTransactionRequest` Body
 
 | Field | Annotation | Rule | HTTP on failure |
 |---|---|---|---|
@@ -445,9 +498,9 @@ All errors return a consistent JSON structure:
 ```json
 {
   "timestamp": "2024-06-15T10:30:00.000Z",
-  "status": 404,
-  "error": "Not Found",
-  "message": "Purchase transaction not found for id: a1b2c3d4-..."
+  "status": 400,
+  "error": "Bad Request",
+  "message": "Missing required header: Idempotency-Key. Supply a unique value (e.g. a UUID) per intended transaction."
 }
 ```
 
@@ -455,6 +508,7 @@ All errors return a consistent JSON structure:
 
 | Status | Scenario | Exception |
 |---|---|---|
+| `400 Bad Request` | Missing/blank/too-long `Idempotency-Key` header | `MissingIdempotencyKeyException` |
 | `400 Bad Request` | Validation failure on request body or path/query params | `MethodArgumentNotValidException`, `HttpMessageNotReadableException` |
 | `404 Not Found` | Transaction UUID does not exist | `TransactionNotFoundException` |
 | `422 Unprocessable Entity` | No exchange rate within 6 months, or Treasury API unavailable | `ExchangeRateUnavailableException` |
@@ -463,6 +517,7 @@ All errors return a consistent JSON structure:
 ### `GlobalExceptionHandler`
 
 Implemented as `@RestControllerAdvice`. Handles:
+- `MissingIdempotencyKeyException` → 400
 - `TransactionNotFoundException` → 404
 - `ExchangeRateUnavailableException` → 422
 - `MethodArgumentNotValidException` → 400 (collects all field error messages)
@@ -477,15 +532,15 @@ Implemented as `@RestControllerAdvice`. Handles:
 
 ```
         ┌─────────────┐
-        │ Integration │   4 tests  — Full Spring context + WireMock
+        │ Integration │  11 tests  — Full Spring context + WireMock
         │    Tests    │
         └──────┬──────┘
         ┌──────▼──────┐
-        │  Controller │   8 tests  — @WebMvcTest + MockMvc
+        │  Controller │  11 tests  — @WebMvcTest + MockMvc
         │    Tests    │
         └──────┬──────┘
         ┌──────▼──────┐
-        │    Unit     │  12 tests  — Mockito, no Spring context
+        │    Unit     │  11 tests  — Mockito, no Spring context
         │    Tests    │
         └─────────────┘
 ```
@@ -496,9 +551,10 @@ Implemented as `@RestControllerAdvice`. Handles:
 
 | Test | Covers |
 |---|---|
-| `createTransaction_validRequest_returnsSavedTransaction` | Happy path store |
+| `createTransaction_newKey_createsAndReturns` | Happy path store, `created=true` |
+| `createTransaction_duplicateKey_returnsExistingWithoutSaving` | Duplicate key → no DB write, `created=false` |
 | `createTransaction_convertsCentsToDollars` | 9999 → 99.99 conversion |
-| `createTransaction_oneCent_convertsToOneCentDollar` | Edge case: 1 cent → $0.01 |
+| `createTransaction_oneCent_convertsCorrectly` | Edge case: 1 cent → $0.01 |
 | `getTransactionInCurrency_validRequest_returnsConvertedAmount` | Happy path retrieve + convert |
 | `getTransactionInCurrency_roundsConvertedAmount` | 12.345 → 12.35 rounding |
 | `getTransactionInCurrency_unknownId_throwsNotFoundException` | 404 path |
@@ -517,13 +573,16 @@ Implemented as `@RestControllerAdvice`. Handles:
 
 | Test | Covers |
 |---|---|
-| `createTransaction_validBody_returns201` | Happy path POST |
+| `createTransaction_newKey_returns201` | Happy path POST → 201 |
+| `createTransaction_duplicateKey_returns200WithOriginal` | Duplicate key → 200 |
+| `createTransaction_missingIdempotencyKey_returns400` | Missing header → 400 |
+| `createTransaction_blankIdempotencyKey_returns400` | Blank header → 400 |
+| `createTransaction_tooLongIdempotencyKey_returns400` | 65+ char key → 400 |
 | `createTransaction_blankDescription_returns400` | Blank description |
 | `createTransaction_descriptionTooLong_returns400` | 51+ char description |
 | `createTransaction_zeroAmount_returns201` | $0.00 free transaction |
 | `createTransaction_negativeAmount_returns400` | Negative cents |
-| `createTransaction_missingDate_returns400` | Missing date field |
-| `getTransaction_validRequest_returns200WithConversion` | Happy path GET |
+| `getTransaction_validRequest_returns200` | Happy path GET |
 | `getTransaction_unknownId_returns404` | Unknown UUID |
 | `getTransaction_noExchangeRate_returns422` | No rate available |
 
@@ -531,15 +590,17 @@ Implemented as `@RestControllerAdvice`. Handles:
 
 | Test | Covers |
 |---|---|
-| `storeThenRetrieveWithConversion_returnsConvertedAmount` | Full end-to-end flow |
-| `storeTransaction_oneCent_storedAsOneCentDollar` | 1 cent storage |
+| `duplicateIdempotencyKey_returns200AndOriginalTransaction` | Full idempotency flow end-to-end |
+| `differentIdempotencyKeys_createSeparateTransactions` | Distinct keys → distinct records |
+| `missingIdempotencyKey_returns400` | Missing header in full context |
+| `storeThenRetrieveWithConversion_returnsConvertedAmount` | Full store → retrieve → convert flow |
 | `storeTransaction_descriptionTooLong_returns400` | Validation in full context |
 | `storeTransaction_zeroAmountCents_returns201` | $0.00 in full context |
 | `storeTransaction_negativeAmountCents_returns400` | Negative in full context |
 | `storeTransaction_invalidDateFormat_returns400` | Bad date format |
 | `retrieveTransaction_noRateWithinSixMonths_returns422` | Empty Treasury stub |
 | `retrieveTransaction_unknownId_returns404` | Missing transaction |
-| `retrieveTransaction_convertedAmountRoundedToTwoDecimals` | Rounding in full context |
+| `retrieveTransaction_convertedAmountRoundedCorrectly` | Rounding in full context |
 
 ### Running Tests
 
@@ -620,6 +681,17 @@ mvn spring-boot:run
 # Store a transaction ($99.99)
 curl -s -X POST http://localhost:8080/api/v1/transactions \
   -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000" \
+  -d '{
+    "description": "Office supplies",
+    "transactionDate": "2024-06-15",
+    "purchaseAmountCents": 9999
+  }' | jq
+
+# Replay the same request — returns 200 OK with same id, no duplicate created
+curl -s -X POST http://localhost:8080/api/v1/transactions \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000" \
   -d '{
     "description": "Office supplies",
     "transactionDate": "2024-06-15",
@@ -629,9 +701,10 @@ curl -s -X POST http://localhost:8080/api/v1/transactions \
 # Retrieve with currency conversion (replace {id} with UUID from above)
 curl -s "http://localhost:8080/api/v1/transactions/{id}?currency=Canada-Dollar" | jq
 
-# Store a free ($0.00) transaction
+# Store a free ($0.00) transaction with a new key
 curl -s -X POST http://localhost:8080/api/v1/transactions \
   -H "Content-Type: application/json" \
+  -H "Idempotency-Key: free-item-key-001" \
   -d '{
     "description": "Free item",
     "transactionDate": "2024-06-15",
@@ -642,6 +715,14 @@ curl -s -X POST http://localhost:8080/api/v1/transactions \
 ---
 
 ## 15. Design Decisions & Trade-offs
+
+### Idempotency via `Idempotency-Key` Header
+
+A client-supplied header was chosen over server-side duplicate detection (e.g. hashing the request body) because it gives the client explicit control over what constitutes a duplicate. Two logically separate transactions with identical data (same description, date, amount) should both be stored — only an intentional retry of the same request should be deduplicated. The header makes that intent unambiguous.
+
+The application checks for an existing key before inserting (application-level idempotency). A `UNIQUE` database constraint on `idempotency_key` is also present as a safety net against race conditions in concurrent environments.
+
+Duplicate requests return **200 OK** rather than 201 to let the client distinguish a new creation from a replayed response. The body is identical in both cases.
 
 ### Cents as Input Format
 
