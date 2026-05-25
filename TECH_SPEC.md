@@ -1,6 +1,6 @@
 # WEX Purchase Transaction API — Technical Specification
 
-**Version:** 1.0.0
+**Version:** 1.2.0
 **Language:** Java 21
 **Framework:** Spring Boot 3.2.x
 **Last Updated:** 2025-05-25
@@ -21,9 +21,12 @@
 10. [Validation Rules](#10-validation-rules)
 11. [Error Handling](#11-error-handling)
 12. [Testing Strategy](#12-testing-strategy)
-13. [Configuration](#13-configuration)
-14. [Local Setup](#14-local-setup)
-15. [Design Decisions & Trade-offs](#15-design-decisions--trade-offs)
+13. [Code Quality — Coverage & Linting](#13-code-quality--coverage--linting)
+14. [Pre-commit Hook](#14-pre-commit-hook)
+15. [OpenAPI Specification](#15-openapi-specification)
+16. [Configuration](#16-configuration)
+17. [Local Setup & Developer Onboarding](#17-local-setup--developer-onboarding)
+18. [Design Decisions & Trade-offs](#18-design-decisions--trade-offs)
 
 ---
 
@@ -120,6 +123,9 @@ Client
 | Test — Web | `@WebMvcTest` + MockMvc | Controller slice tests without full context startup |
 | Test — Integration | `@SpringBootTest` + WireMock | Full context with external API stubbed via WireMock |
 | Build | Maven 3.8+ | Standard Java build tool; reproducible dependency resolution |
+| Coverage | JaCoCo 0.8.11 | Line coverage reporting + 80% minimum threshold enforced at `verify` phase |
+| Linter | Checkstyle 3.3.1 | Google Java Style-based rules; enforced at `validate` phase |
+| API Docs | SpringDoc OpenAPI 2.5.0 | Auto-generates `/v3/api-docs` and Swagger UI at `/swagger-ui.html` |
 
 ---
 
@@ -130,6 +136,12 @@ wex-purchase-api/
 ├── pom.xml
 ├── README.md
 ├── TECH_SPEC.md
+├── checkstyle.xml                           # Checkstyle linter rules
+├── .githooks/
+│   └── pre-commit                           # Pre-commit hook (linter + tests + coverage)
+├── docs/
+│   ├── openapi.yaml                         # OpenAPI 3 API specification
+│   └── datamodel.mermaid                    # Entity-relationship diagram
 └── src/
     ├── main/
     │   ├── java/com/wex/purchase/
@@ -192,6 +204,21 @@ wex-purchase-api/
 - `idempotency_key` has a `UNIQUE` database constraint (`uc_idempotency_key`) enforcing deduplication at the storage level as a safety net, in addition to the application-level check.
 - `purchase_amount` is always stored in **US dollars** with exactly 2 decimal places, regardless of how the client submits the value.
 - The `purchaseAmountCents` field exists only in the request DTO; it is converted to dollars before persistence.
+
+### Entity-Relationship Diagram
+
+```mermaid
+erDiagram
+    PURCHASE_TRANSACTIONS {
+        VARCHAR_36   id                PK  "UUID, auto-generated (Java)"
+        VARCHAR_64   idempotency_key   UK  "Unique, client-supplied per request"
+        VARCHAR_50   description           "Max 50 chars, not null"
+        DATE         transaction_date      "ISO date, not null"
+        DECIMAL_17_2 purchase_amount       "Stored in USD (cents / 100), not null"
+    }
+```
+
+Full source: [`docs/datamodel.mermaid`](./docs/datamodel.mermaid)
 
 ### Cents → Dollars Conversion
 
@@ -611,7 +638,142 @@ mvn verify        # tests + build verification
 
 ---
 
-## 13. Configuration
+## 13. Code Quality — Coverage & Linting
+
+### Code Coverage (JaCoCo)
+
+JaCoCo is configured to run automatically as part of `mvn verify`. It instruments bytecode, collects test execution data, and generates reports.
+
+**Commands:**
+
+```bash
+# Run tests + generate coverage report + enforce threshold
+mvn verify
+
+# Generate report only (no threshold enforcement)
+mvn jacoco:report
+
+# Open HTML report
+open target/site/jacoco/index.html        # macOS
+xdg-open target/site/jacoco/index.html   # Linux
+```
+
+**Report location:** `target/site/jacoco/index.html`
+
+**Threshold:** Line coverage must be ≥ **80%** or the build fails. The threshold is configured in `pom.xml`:
+
+```xml
+<jacoco.line.coverage.minimum>0.80</jacoco.line.coverage.minimum>
+```
+
+Override temporarily:
+```bash
+mvn verify -Djacoco.line.coverage.minimum=0.0
+```
+
+**Excluded from threshold** (generated / config classes):
+- `com.wex.purchase.PurchaseApiApplication`
+- `com.wex.purchase.config.*`
+
+---
+
+### Linter (Checkstyle)
+
+Checkstyle enforces code style at the `validate` Maven phase — before compilation — so violations are caught immediately.
+
+**Commands:**
+
+```bash
+# Check for violations (fails build on errors) — runs automatically in mvn verify
+mvn checkstyle:check
+
+# Generate HTML style report without failing the build
+mvn checkstyle:checkstyle
+
+# Open report
+open target/site/checkstyle.html         # macOS
+xdg-open target/site/checkstyle.html    # Linux
+```
+
+**Config file:** [`checkstyle.xml`](./checkstyle.xml)
+
+**Rules enforced:**
+
+| Rule | Detail |
+|---|---|
+| No tab characters | Spaces only; every line checked |
+| Line length | Max 120 characters |
+| Star imports | Forbidden (`AvoidStarImport`) |
+| Unused imports | Flagged (`UnusedImports`) |
+| Naming conventions | Classes, methods, variables, constants, packages |
+| Braces | Required on all `if`/`for`/`while` blocks |
+| `equals`/`hashCode` | Must be paired (`EqualsHashCode`) |
+| Modifier order | Standard Java modifier ordering |
+| One statement per line | No stacked statements |
+| Javadoc | Required on public methods (excluding getters/setters) |
+
+---
+
+## 14. Pre-commit Hook
+
+A Git pre-commit hook is provided at `.githooks/pre-commit`. It runs both quality checks before every commit, blocking the commit if either fails.
+
+### Installation (once per clone)
+
+```bash
+git config core.hooksPath .githooks
+chmod +x .githooks/pre-commit
+```
+
+### What it runs
+
+```
+[1/2] mvn checkstyle:check     ← linter
+[2/2] mvn verify               ← tests + 80% coverage
+```
+
+Both must pass for the commit to proceed. Output is colour-coded (green = pass, red = fail) with instructions to view reports on failure.
+
+### Bypassing (exceptional cases only)
+
+```bash
+git commit --no-verify -m "your message"
+```
+
+---
+
+## 15. OpenAPI Specification
+
+The API is documented in OpenAPI 3 format in two ways:
+
+### Static YAML
+
+**File:** [`docs/openapi.yaml`](./docs/openapi.yaml)
+
+A hand-authored, version-controlled spec covering all endpoints, request/response schemas, header parameters, error responses, and examples. Import into any OpenAPI-compatible tool:
+
+- **Postman**: File → Import → upload `docs/openapi.yaml`
+- **Insomnia**: Application → Import/Export → Import Data → From File
+- **Swagger Editor**: paste at [editor.swagger.io](https://editor.swagger.io)
+
+### Live Swagger UI (server must be running)
+
+```bash
+mvn spring-boot:run
+```
+
+| URL | Description |
+|---|---|
+| `http://localhost:8080/swagger-ui.html` | Interactive Swagger UI |
+| `http://localhost:8080/v3/api-docs` | OpenAPI JSON (live, auto-generated) |
+| `http://localhost:8080/v3/api-docs.yaml` | OpenAPI YAML (live, auto-generated) |
+
+The live spec is auto-generated by SpringDoc from annotations and controller code. The static `docs/openapi.yaml` is the authoritative contract for onboarding and tool import.
+
+---
+
+
+## 16. Configuration
 
 ### `application.properties`
 
@@ -651,29 +813,50 @@ spring.h2.console.enabled=false
 
 ---
 
-## 14. Local Setup
+## 17. Local Setup & Developer Onboarding
 
 ### Prerequisites
 
 - Java 21+
 - Maven 3.8+
+- Git (for pre-commit hook)
 
-### Steps
+### First-time Setup
 
 ```bash
 # 1. Unzip or clone the project
 cd wex-purchase-api
 
-# 2. Build and run all tests
+# 2. Install the pre-commit hook (one-time per clone)
+git config core.hooksPath .githooks
+chmod +x .githooks/pre-commit
+
+# 3. Build, lint, test, and check coverage
 mvn clean verify
 
-# 3. Start the server
+# 4. Start the server
 mvn spring-boot:run
-
-# Server starts at http://localhost:8080
-# H2 console at http://localhost:8080/h2-console
-#   JDBC URL: jdbc:h2:mem:purchasedb  (no password)
 ```
+
+| URL | Description |
+|---|---|
+| `http://localhost:8080` | API base URL |
+| `http://localhost:8080/swagger-ui.html` | Swagger UI |
+| `http://localhost:8080/v3/api-docs` | Live OpenAPI JSON |
+| `http://localhost:8080/h2-console` | H2 DB console (JDBC: `jdbc:h2:mem:purchasedb`, no password) |
+
+### Developer Command Reference
+
+| Task | Command |
+|---|---|
+| Build + all checks | `mvn clean verify` |
+| Run tests only | `mvn test` |
+| Checkstyle check | `mvn checkstyle:check` |
+| Checkstyle HTML report | `mvn checkstyle:checkstyle` |
+| Coverage report | `mvn verify` → `target/site/jacoco/index.html` |
+| Start server | `mvn spring-boot:run` |
+| Skip coverage threshold | `mvn verify -Djacoco.line.coverage.minimum=0.0` |
+| Skip pre-commit hook | `git commit --no-verify` |
 
 ### Quick Smoke Test
 
@@ -688,7 +871,7 @@ curl -s -X POST http://localhost:8080/api/v1/transactions \
     "purchaseAmountCents": 9999
   }' | jq
 
-# Replay the same request — returns 200 OK with same id, no duplicate created
+# Replay same key — 200 OK, same id, no duplicate
 curl -s -X POST http://localhost:8080/api/v1/transactions \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000" \
@@ -698,10 +881,10 @@ curl -s -X POST http://localhost:8080/api/v1/transactions \
     "purchaseAmountCents": 9999
   }' | jq
 
-# Retrieve with currency conversion (replace {id} with UUID from above)
+# Retrieve with currency conversion (replace {id})
 curl -s "http://localhost:8080/api/v1/transactions/{id}?currency=Canada-Dollar" | jq
 
-# Store a free ($0.00) transaction with a new key
+# Free transaction
 curl -s -X POST http://localhost:8080/api/v1/transactions \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: free-item-key-001" \
@@ -714,7 +897,7 @@ curl -s -X POST http://localhost:8080/api/v1/transactions \
 
 ---
 
-## 15. Design Decisions & Trade-offs
+## 18. Design Decisions & Trade-offs
 
 ### Idempotency via `Idempotency-Key` Header
 

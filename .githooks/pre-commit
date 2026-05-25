@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# =============================================================================
+# WEX Purchase API — Pre-commit Hook
+#
+# Runs Checkstyle (linter) and the full test suite with coverage check before
+# every commit. The commit is blocked if any check fails.
+#
+# Installation (run once from project root):
+#   git config core.hooksPath .githooks
+#   chmod +x .githooks/pre-commit
+# =============================================================================
+
+set -euo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Colour
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  WEX Pre-commit Checks"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+# ── 1. Checkstyle ──────────────────────────────────────────────────────────
+echo -e "${YELLOW}[1/2] Running Checkstyle (linter)...${NC}"
+if mvn checkstyle:check --quiet; then
+  echo -e "${GREEN}  ✔ Checkstyle passed${NC}"
+else
+  echo -e "${RED}  ✘ Checkstyle failed. Fix style violations before committing.${NC}"
+  echo -e "      Run:  mvn checkstyle:checkstyle"
+  echo -e "      View: target/site/checkstyle.html"
+  exit 1
+fi
+
+# ── 2. Tests + Coverage ────────────────────────────────────────────────────
+echo ""
+echo -e "${YELLOW}[2/2] Running tests and coverage check...${NC}"
+if mvn verify --quiet -Djacoco.line.coverage.minimum=0.80; then
+  echo -e "${GREEN}  ✔ All tests passed and coverage threshold met${NC}"
+  echo -e "      Coverage report: target/site/jacoco/index.html"
+else
+  echo -e "${RED}  ✘ Tests or coverage check failed. Fix before committing.${NC}"
+  echo -e "      Run:  mvn verify"
+  echo -e "      View: target/site/jacoco/index.html"
+  exit 1
+fi
+
+echo ""
+echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${GREEN}  All pre-commit checks passed. Proceeding with commit.${NC}"
+echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo ""

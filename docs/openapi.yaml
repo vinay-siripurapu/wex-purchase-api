@@ -1,0 +1,323 @@
+openapi: 3.0.3
+
+info:
+  title: WEX Purchase Transaction API
+  description: |
+    REST API to store purchase transactions in USD and retrieve them
+    converted to any currency supported by the
+    [US Treasury Reporting Rates of Exchange](https://fiscaldata.treasury.gov/datasets/treasury-reporting-rates-exchange/treasury-reporting-rates-of-exchange).
+
+    ## Idempotency
+    The `POST /api/v1/transactions` endpoint is idempotent. Supply a unique
+    `Idempotency-Key` header (e.g. a UUID) on every store request. If the
+    same key is sent again, the original stored response is returned with
+    `HTTP 200` and no duplicate is created.
+
+    ## Currency Labels
+    The `currency` query parameter must match a `country_currency_desc` value
+    from the Treasury API, e.g. `Canada-Dollar`, `Euro Zone-Euro`, `Japan-Yen`.
+    Query the full list at:
+    ```
+    GET https://api.fiscaldata.treasury.gov/services/api/v1/accounting/od/rates_of_exchange
+          ?fields=country_currency_desc&page[size]=200
+    ```
+  version: 1.1.0
+  contact:
+    name: WEX Corporate Payments Engineering
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+
+tags:
+  - name: Transactions
+    description: Purchase transaction operations
+
+paths:
+
+  /api/v1/transactions:
+    post:
+      tags: [Transactions]
+      summary: Store a purchase transaction
+      description: |
+        Persists a new purchase transaction. The `Idempotency-Key` header is
+        **required** to prevent duplicate submissions.
+
+        - First request with a key → `201 Created`, transaction stored.
+        - Repeat request with same key → `200 OK`, original response replayed,
+          no duplicate created.
+      operationId: createTransaction
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTransactionRequest'
+            examples:
+              typical:
+                summary: Standard purchase
+                value:
+                  description: Office supplies
+                  transactionDate: "2024-06-15"
+                  purchaseAmountCents: 9999
+              free:
+                summary: Free / zero-dollar transaction
+                value:
+                  description: Promotional item
+                  transactionDate: "2024-06-15"
+                  purchaseAmountCents: 0
+      responses:
+        '201':
+          description: Transaction created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+              example:
+                id: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                description: Office supplies
+                transactionDate: "2024-06-15"
+                purchaseAmountUsd: 99.99
+        '200':
+          description: Duplicate key — original transaction replayed, no new record created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+              example:
+                id: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                description: Office supplies
+                transactionDate: "2024-06-15"
+                purchaseAmountUsd: 99.99
+        '400':
+          description: Validation error or missing/invalid Idempotency-Key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                missingKey:
+                  summary: Missing Idempotency-Key header
+                  value:
+                    timestamp: "2024-06-15T10:30:00.000Z"
+                    status: 400
+                    error: Bad Request
+                    message: "Missing required header: Idempotency-Key. Supply a unique value (e.g. a UUID) per intended transaction."
+                validationFailure:
+                  summary: Request body validation failure
+                  value:
+                    timestamp: "2024-06-15T10:30:00.000Z"
+                    status: 400
+                    error: Bad Request
+                    message: "Description must not exceed 50 characters"
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/transactions/{id}:
+    get:
+      tags: [Transactions]
+      summary: Retrieve a transaction in a target currency
+      description: |
+        Looks up a stored transaction by UUID and returns it with the purchase
+        amount converted to the specified currency using the exchange rate
+        published by the US Treasury Reporting Rates of Exchange API.
+
+        The rate used must have a `record_date` on or before the purchase date
+        and within 6 months prior to it. If no qualifying rate exists, `422`
+        is returned.
+      operationId: getTransaction
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: UUID of the stored transaction
+          schema:
+            type: string
+            format: uuid
+          example: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+        - name: currency
+          in: query
+          required: true
+          description: |
+            Target currency as a `country_currency_desc` label from the Treasury API.
+            Examples: `Canada-Dollar`, `Euro Zone-Euro`, `Japan-Yen`,
+            `United Kingdom-Pound`, `Australia-Dollar`, `India-Rupee`.
+          schema:
+            type: string
+          example: Canada-Dollar
+      responses:
+        '200':
+          description: Transaction retrieved and converted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConvertedTransactionResponse'
+              example:
+                id: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                description: Office supplies
+                transactionDate: "2024-06-15"
+                purchaseAmountUsd: 99.99
+                targetCurrency: Canada-Dollar
+                exchangeRate: 1.35
+                convertedAmount: 134.99
+        '400':
+          description: Invalid UUID format in path
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Transaction not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                timestamp: "2024-06-15T10:30:00.000Z"
+                status: 404
+                error: Not Found
+                message: "Purchase transaction not found for id: a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        '422':
+          description: No exchange rate available within 6 months of the purchase date
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                timestamp: "2024-06-15T10:30:00.000Z"
+                status: 422
+                error: Unprocessable Entity
+                message: "Purchase cannot be converted to the target currency 'Canada-Dollar': no exchange rate available within 6 months of the purchase date."
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+components:
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        Client-generated unique key for this request (max 64 characters).
+        A UUID v4 is recommended. Repeating the same key returns the original
+        response without creating a duplicate transaction.
+      schema:
+        type: string
+        maxLength: 64
+        example: 550e8400-e29b-41d4-a716-446655440000
+
+  schemas:
+
+    CreateTransactionRequest:
+      type: object
+      required:
+        - description
+        - transactionDate
+        - purchaseAmountCents
+      properties:
+        description:
+          type: string
+          maxLength: 50
+          description: Human-readable description of the purchase
+          example: Office supplies
+        transactionDate:
+          type: string
+          format: date
+          description: Date of the purchase in ISO 8601 format (YYYY-MM-DD)
+          example: "2024-06-15"
+        purchaseAmountCents:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            Purchase amount in US cents. The last two digits represent cents.
+            Examples: `9999` = $99.99, `100` = $1.00, `0` = $0.00.
+          example: 9999
+
+    TransactionResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Auto-generated unique identifier for the transaction
+          example: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+        description:
+          type: string
+          example: Office supplies
+        transactionDate:
+          type: string
+          format: date
+          example: "2024-06-15"
+        purchaseAmountUsd:
+          type: number
+          format: double
+          description: Purchase amount in US dollars (converted from cents input)
+          example: 99.99
+
+    ConvertedTransactionResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+        description:
+          type: string
+          example: Office supplies
+        transactionDate:
+          type: string
+          format: date
+          example: "2024-06-15"
+        purchaseAmountUsd:
+          type: number
+          format: double
+          description: Original purchase amount in US dollars
+          example: 99.99
+        targetCurrency:
+          type: string
+          description: The target currency label as used in the Treasury API
+          example: Canada-Dollar
+        exchangeRate:
+          type: number
+          format: double
+          description: Exchange rate applied (from Treasury API, most recent within 6 months)
+          example: 1.35
+        convertedAmount:
+          type: number
+          format: double
+          description: Purchase amount converted to target currency, rounded to 2 decimal places
+          example: 134.99
+
+    ErrorResponse:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+          example: "2024-06-15T10:30:00.000Z"
+        status:
+          type: integer
+          example: 400
+        error:
+          type: string
+          example: Bad Request
+        message:
+          type: string
+          example: Description must not exceed 50 characters
+
+  responses:
+    InternalServerError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            timestamp: "2024-06-15T10:30:00.000Z"
+            status: 500
+            error: Internal Server Error
+            message: An unexpected error occurred
