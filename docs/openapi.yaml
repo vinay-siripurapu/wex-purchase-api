@@ -60,13 +60,13 @@ paths:
                 summary: Standard purchase
                 value:
                   description: Office supplies
-                  transactionDate: "2024-06-15"
+                  transactionDate: "2024-06-15T14:30:00"
                   purchaseAmountCents: 9999
               free:
                 summary: Free / zero-dollar transaction
                 value:
                   description: Promotional item
-                  transactionDate: "2024-06-15"
+                  transactionDate: "2024-06-15T14:30:00"
                   purchaseAmountCents: 0
       responses:
         '201':
@@ -78,7 +78,7 @@ paths:
               example:
                 id: a1b2c3d4-e5f6-7890-abcd-ef1234567890
                 description: Office supplies
-                transactionDate: "2024-06-15"
+                transactionDate: "2024-06-15T14:30:00"
                 purchaseAmountUsd: 99.99
         '200':
           description: Duplicate key — original transaction replayed, no new record created
@@ -89,7 +89,7 @@ paths:
               example:
                 id: a1b2c3d4-e5f6-7890-abcd-ef1234567890
                 description: Office supplies
-                transactionDate: "2024-06-15"
+                transactionDate: "2024-06-15T14:30:00"
                 purchaseAmountUsd: 99.99
         '400':
           description: Validation error or missing/invalid Idempotency-Key
@@ -157,7 +157,7 @@ paths:
               example:
                 id: a1b2c3d4-e5f6-7890-abcd-ef1234567890
                 description: Office supplies
-                transactionDate: "2024-06-15"
+                transactionDate: "2024-06-15T14:30:00"
                 purchaseAmountUsd: 99.99
                 targetCurrency: Canada-Dollar
                 exchangeRate: 1.35
