@@ -225,9 +225,9 @@ components:
           example: Office supplies
         transactionDate:
           type: string
-          format: date
-          description: Date of the purchase in ISO 8601 format (YYYY-MM-DD)
-          example: "2024-06-15"
+          format: date-time
+          description: Date of the purchase in ISO 8601 datetime format (YYYY-MM-DDTHH:MM:SS)
+          example: "2024-06-15T14:30:00"
         purchaseAmountCents:
           type: integer
           format: int64
@@ -250,8 +250,8 @@ components:
           example: Office supplies
         transactionDate:
           type: string
-          format: date
-          example: "2024-06-15"
+          format: date-time
+          example: "2024-06-15T14:30:00"
         purchaseAmountUsd:
           type: number
           format: double
@@ -270,8 +270,8 @@ components:
           example: Office supplies
         transactionDate:
           type: string
-          format: date
-          example: "2024-06-15"
+          format: date-time
+          example: "2024-06-15T14:30:00"
         purchaseAmountUsd:
           type: number
           format: double

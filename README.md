@@ -14,7 +14,9 @@ A production-ready REST API to store purchase transactions in USD and retrieve t
 
 - Java 21+
 - Maven 3.8+
+- Docker (for local MySQL via Testcontainers / docker-compose)
 - Git (for pre-commit hooks)
+- AWS Aurora MySQL (production)
 
 ---
 
@@ -24,22 +26,63 @@ A production-ready REST API to store purchase transactions in USD and retrieve t
 # 1. Clone and navigate
 cd wex-purchase-api
 
-# 2. Install pre-commit hook (one-time setup)
+# 2. Install the pre-commit hook (one-time per clone)
 git config core.hooksPath .githooks
 chmod +x .githooks/pre-commit
 
-# 3. Build, lint, test, and check coverage
+# 3. Start a local MySQL instance
+docker run --name wex-mysql \
+  -e MYSQL_ROOT_PASSWORD=root \
+  -e MYSQL_DATABASE=purchasedb \
+  -e MYSQL_USER=wex_user \
+  -e MYSQL_PASSWORD=wex_pass \
+  -p 3306:3306 -d mysql:8.0
+
+# 4. Build, lint, test, and check coverage
+#    (integration tests use Testcontainers — no manual DB setup needed for tests)
 mvn clean verify
 
-# 4. Start the server
-mvn spring-boot:run
+# 5. Start the server (local profile)
+SPRING_PROFILES_ACTIVE=local mvn spring-boot:run
 ```
 
 The API will be available at `http://localhost:8080`.
 
-Swagger UI: `http://localhost:8080/swagger-ui.html`
-OpenAPI JSON: `http://localhost:8080/v3/api-docs`
-H2 Console: `http://localhost:8080/h2-console` (JDBC URL: `jdbc:h2:mem:purchasedb`, no password)
+| URL | Description |
+|---|---|
+| `http://localhost:8080` | API base |
+| `http://localhost:8080/swagger-ui.html` | Swagger UI |
+| `http://localhost:8080/v3/api-docs` | Live OpenAPI JSON |
+| `http://localhost:8080/actuator/health` | Health check (AWS ALB / ECS) |
+
+---
+
+## Database
+
+The application uses **AWS Aurora MySQL** in production. Schema is managed by **Flyway** — migrations run automatically on startup.
+
+### Profiles
+
+| Profile | Database | How to activate |
+|---|---|---|
+| *(default)* | Aurora MySQL via `${DB_URL}` env var | Set `DB_URL`, `DB_USERNAME`, `DB_PASSWORD` |
+| `local` | Local MySQL on `localhost:3306` | `SPRING_PROFILES_ACTIVE=local` |
+| `test` | Testcontainers MySQL (Docker, auto-managed) | Used automatically by `mvn test` |
+
+### Flyway Migrations
+
+```bash
+# Migrations run automatically on startup.
+# To run manually against a target DB:
+mvn flyway:migrate -Dflyway.url=jdbc:mysql://host:3306/purchasedb \
+                   -Dflyway.user=wex_user \
+                   -Dflyway.password=secret
+
+# Check migration status
+mvn flyway:info
+```
+
+Migration scripts: `src/main/resources/db/migration/`
 
 ---
 
@@ -58,7 +101,7 @@ Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
 
 {
   "description": "Office supplies",
-  "transactionDate": "2024-06-15",
+  "transactionDate": "2024-06-15T14:30:00",
   "purchaseAmountCents": 9999
 }
 ```
@@ -67,7 +110,7 @@ Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
 |---|---|---|
 | `Idempotency-Key` | Header (string) | Required, max 64 chars |
 | `description` | string | Required, max 50 characters |
-| `transactionDate` | date | Required, `YYYY-MM-DD` |
+| `transactionDate` | datetime | Required, `YYYY-MM-DDTHH:MM:SS` (time component required) |
 | `purchaseAmountCents` | long | Required, non-negative; `9999` = $99.99, `0` = $0.00 |
 
 Response `201 Created` (new) / `200 OK` (duplicate key replayed):
@@ -75,7 +118,7 @@ Response `201 Created` (new) / `200 OK` (duplicate key replayed):
 {
   "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "description": "Office supplies",
-  "transactionDate": "2024-06-15",
+  "transactionDate": "2024-06-15T14:30:00",
   "purchaseAmountUsd": 99.99
 }
 ```
@@ -96,7 +139,7 @@ Response `200 OK`:
 {
   "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "description": "Office supplies",
-  "transactionDate": "2024-06-15",
+  "transactionDate": "2024-06-15T14:30:00",
   "purchaseAmountUsd": 99.99,
   "targetCurrency": "Canada-Dollar",
   "exchangeRate": 1.35,
@@ -133,29 +176,27 @@ Common currency labels: `Canada-Dollar`, `Euro Zone-Euro`, `Japan-Yen`, `United 
 ### Tests
 
 ```bash
-# Run all tests (unit + controller + integration)
+# Run all tests (unit + controller + integration via Testcontainers)
 mvn test
 
 # Run tests + coverage report + coverage threshold check
 mvn verify
 ```
 
+> Integration tests require Docker running locally (Testcontainers pulls `mysql:8.0` automatically).
+
 ### Code Coverage
 
 ```bash
-# Generate HTML coverage report
+# Generate HTML coverage report (also enforces 80% threshold)
 mvn verify
 
-# Open report (macOS)
-open target/site/jacoco/index.html
-
-# Open report (Linux)
-xdg-open target/site/jacoco/index.html
+# Open report
+open target/site/jacoco/index.html        # macOS
+xdg-open target/site/jacoco/index.html   # Linux
 ```
 
-Coverage report is at `target/site/jacoco/index.html`. The build fails if line coverage drops below **80%**.
-
-To override the threshold temporarily (e.g. during prototyping):
+Override threshold temporarily:
 ```bash
 mvn verify -Djacoco.line.coverage.minimum=0.0
 ```
@@ -163,76 +204,37 @@ mvn verify -Djacoco.line.coverage.minimum=0.0
 ### Linter (Checkstyle)
 
 ```bash
-# Check for style violations (fails build on errors)
+# Check for violations
 mvn checkstyle:check
 
-# Generate HTML style report without failing
+# Generate HTML report without failing
 mvn checkstyle:checkstyle
-
-# Open report (macOS)
 open target/site/checkstyle.html
 ```
 
-Checkstyle enforces:
-- No tab characters (spaces only)
-- Max line length: 120 characters
-- No star imports or unused imports
-- Standard Java naming conventions
-- Required braces on all blocks
-- `equals()` and `hashCode()` paired
-
-Style config: [`checkstyle.xml`](./checkstyle.xml)
-
 ### Pre-commit Hook
 
-Install once per clone:
 ```bash
+# Install (once per clone)
 git config core.hooksPath .githooks
 chmod +x .githooks/pre-commit
-```
 
-The hook runs automatically before every `git commit` and executes:
-1. `mvn checkstyle:check` — linter
-2. `mvn verify` — tests + 80% coverage check
-
-To bypass in exceptional cases:
-```bash
+# Bypass (exceptional cases only)
 git commit --no-verify -m "your message"
 ```
 
 ### Swagger UI
 
-With the server running (`mvn spring-boot:run`):
-
-- Interactive UI: `http://localhost:8080/swagger-ui.html`
-- Raw OpenAPI JSON: `http://localhost:8080/v3/api-docs`
-- Static YAML spec: [`docs/openapi.yaml`](./docs/openapi.yaml)
-
-The static YAML can be imported into **Postman**, **Insomnia**, or any OpenAPI-compatible tool.
+```bash
+SPRING_PROFILES_ACTIVE=local mvn spring-boot:run
+open http://localhost:8080/swagger-ui.html
+```
 
 ---
 
-## Data Model
+## Production Deployment (AWS)
 
-```
-┌──────────────────────────────────────────────────────────┐
-│                   purchase_transactions                  │
-├─────────────────┬─────────────┬────────────────────────  ┤
-│ id              │ VARCHAR(36) │ PK — UUID, auto-generated │
-│ idempotency_key │ VARCHAR(64) │ UK — unique per request   │
-│ description     │ VARCHAR(50) │ Not null                  │
-│ transaction_date│ DATE        │ Not null                  │
-│ purchase_amount │ DECIMAL(17,2│ Not null, stored in USD   │
-└─────────────────┴─────────────┴───────────────────────── ┘
-```
-
-Full ERD: [`docs/datamodel.mermaid`](./docs/datamodel.mermaid)
-
----
-
-## Production Notes
-
-- **Database**: H2 in-memory by default. Swap to PostgreSQL via `application.properties` — no code changes required.
-- **H2 Console**: Disable in production: `spring.h2.console.enabled=false`.
-- **Timeouts**: Treasury API timeouts configurable via `treasury.api.connect-timeout-ms` and `treasury.api.read-timeout-ms`.
-- **Coverage threshold**: Adjust `jacoco.line.coverage.minimum` in `pom.xml` (currently `0.80`).
+- **Database**: Aurora MySQL cluster — set `DB_URL`, `DB_USERNAME`, `DB_PASSWORD` via ECS task environment or AWS Secrets Manager.
+- **Schema**: Flyway runs on startup — ensure the DB user has `CREATE`, `ALTER`, `INSERT`, `SELECT`, `UPDATE`, `DELETE` on the schema.
+- **Health check**: `GET /actuator/health` — returns `{"status":"UP"}` when DB is reachable. Use as ALB target group health check path.
+- **H2 console**: Not present — removed entirely.

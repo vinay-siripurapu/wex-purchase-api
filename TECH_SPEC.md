@@ -1,6 +1,6 @@
 # WEX Purchase Transaction API — Technical Specification
 
-**Version:** 1.2.0
+**Version:** 1.4.0
 **Language:** Java 21
 **Framework:** Spring Boot 3.2.x
 **Last Updated:** 2025-05-25
@@ -37,7 +37,7 @@ The WEX Purchase Transaction API is a RESTful backend service that allows client
 1. **Store** a purchase transaction in USD — idempotently, preventing duplicates via a client-supplied `Idempotency-Key` header.
 2. **Retrieve** a stored transaction with the purchase amount converted to a target currency, using exchange rates published by the US Treasury Reporting Rates of Exchange API.
 
-The service is built for production readiness: validated inputs, idempotent writes, structured error responses, full automated test coverage, and an externally configurable datasource and Treasury API URL.
+The service is built for production readiness: validated inputs, idempotent writes, structured error responses, full automated test coverage, Aurora MySQL via Flyway-managed schema migrations, and environment-variable-driven configuration for AWS deployment.
 
 ---
 
@@ -116,7 +116,10 @@ Client
 |---|---|---|
 | Language | Java 21 | Required by brief; LTS release with virtual threads & records |
 | Framework | Spring Boot 3.2.x | Industry standard; built-in validation, JPA, web, test slice support |
-| Persistence | Spring Data JPA + H2 | Zero-config embedded DB for dev/test; swap to PostgreSQL via config |
+| Persistence | Spring Data JPA + Aurora MySQL | Production-grade AWS managed MySQL; schema managed by Flyway migrations |
+| Connection Pool | HikariCP | Default Spring Boot pool; tuned for Aurora multi-AZ failover |
+| Schema Migrations | Flyway 10.x | Version-controlled SQL migrations; runs automatically on startup |
+| Test DB | Testcontainers (MySQL 8.0) | Spins up a real MySQL Docker container for integration tests; no mocking |
 | Validation | Jakarta Validation (`spring-boot-starter-validation`) | Declarative, annotation-driven, integrates with MockMvc error handling |
 | HTTP Client | `RestTemplate` (Spring Web) | Sufficient for synchronous external calls; easily mockable in tests |
 | Test — Unit | JUnit 5 + Mockito | Standard Java unit testing; full isolation via mocks |
@@ -169,7 +172,12 @@ wex-purchase-api/
     │   │       ├── PurchaseTransactionService.java
     │   │       └── TreasuryExchangeRateService.java
     │   └── resources/
-    │       └── application.properties
+    │       ├── application.properties          # Production config (env vars)
+    │       ├── application-local.properties    # Local dev (localhost MySQL)
+    │       └── db/
+    │           └── migration/
+    │               ├── V1__create_purchase_transactions.sql
+    │               └── V2__alter_transaction_date_to_datetime.sql
     └── test/
         ├── java/com/wex/purchase/
         │   ├── controller/
@@ -180,7 +188,7 @@ wex-purchase-api/
         │       ├── PurchaseTransactionServiceTest.java
         │       └── TreasuryExchangeRateServiceTest.java
         └── resources/
-            └── application-test.properties
+            └── application-test.properties     # Test profile (Testcontainers)
 ```
 
 ---
@@ -193,17 +201,18 @@ wex-purchase-api/
 
 | Column | Java Type | DB Type | Constraints |
 |---|---|---|---|
-| `id` | `UUID` | `VARCHAR(36)` | Primary key, not null, immutable |
-| `idempotency_key` | `String` | `VARCHAR(64)` | Not null, unique, immutable |
+| `id` | `UUID` | `CHAR(36)` | Primary key, not null, immutable |
+| `idempotency_key` | `String` | `VARCHAR(64)` | Not null, unique (`uc_idempotency_key`), immutable |
 | `description` | `String` | `VARCHAR(50)` | Not null, max 50 chars |
-| `transaction_date` | `LocalDate` | `DATE` | Not null |
+| `transaction_date` | `LocalDateTime` | `DATETIME` | Not null; full timestamp (date + time), UTC expected |
 | `purchase_amount` | `BigDecimal` | `DECIMAL(17, 2)` | Not null, stored in dollars |
 
 **Notes:**
-- `id` is generated in Java via `UUID.randomUUID()` inside `@PrePersist`, not by the database. This makes IDs predictable in tests and portable across DB engines.
+- `id` is generated in Java via `UUID.randomUUID()` inside `@PrePersist`, not by the database. Stored as `CHAR(36)` in Aurora MySQL — avoids binary UUID complexity while remaining portable.
 - `idempotency_key` has a `UNIQUE` database constraint (`uc_idempotency_key`) enforcing deduplication at the storage level as a safety net, in addition to the application-level check.
 - `purchase_amount` is always stored in **US dollars** with exactly 2 decimal places, regardless of how the client submits the value.
 - The `purchaseAmountCents` field exists only in the request DTO; it is converted to dollars before persistence.
+- `transaction_date` is stored as `DATETIME` (not `DATE`) to preserve the full purchase timestamp. Callers are expected to supply UTC. The date portion is extracted (`.toLocalDate()`) when querying the Treasury API, which operates at day granularity.
 
 ### Entity-Relationship Diagram
 
@@ -213,7 +222,7 @@ erDiagram
         VARCHAR_36   id                PK  "UUID, auto-generated (Java)"
         VARCHAR_64   idempotency_key   UK  "Unique, client-supplied per request"
         VARCHAR_50   description           "Max 50 chars, not null"
-        DATE         transaction_date      "ISO date, not null"
+        DATETIME     transaction_date      "Full timestamp (date + time), UTC, not null"
         DECIMAL_17_2 purchase_amount       "Stored in USD (cents / 100), not null"
     }
 ```
@@ -256,7 +265,7 @@ Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
 
 {
   "description": "Office supplies",
-  "transactionDate": "2024-06-15",
+  "transactionDate": "2024-06-15T14:30:00",
   "purchaseAmountCents": 9999
 }
 ```
@@ -272,7 +281,7 @@ Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
 | Field | Type | Required | Rules |
 |---|---|---|---|
 | `description` | `string` | Yes | Max 50 characters, not blank |
-| `transactionDate` | `string` | Yes | ISO date format `YYYY-MM-DD` |
+| `transactionDate` | `string` | Yes | ISO 8601 datetime `YYYY-MM-DDTHH:MM:SS` (time component required) |
 | `purchaseAmountCents` | `long` | Yes | Non-negative integer; `0` = $0.00 |
 
 **Response — 201 Created** *(new transaction)*
@@ -281,7 +290,7 @@ Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
 {
   "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "description": "Office supplies",
-  "transactionDate": "2024-06-15",
+  "transactionDate": "2024-06-15T14:30:00",
   "purchaseAmountUsd": 99.99
 }
 ```
@@ -318,7 +327,7 @@ GET /api/v1/transactions/a1b2c3d4-e5f6-7890-abcd-ef1234567890?currency=Canada-Do
 {
   "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "description": "Office supplies",
-  "transactionDate": "2024-06-15",
+  "transactionDate": "2024-06-15T14:30:00",
   "purchaseAmountUsd": 99.99,
   "targetCurrency": "Canada-Dollar",
   "exchangeRate": 1.35,
@@ -363,7 +372,7 @@ GET https://api.fiscaldata.treasury.gov/services/api/v1/accounting/od/rates_of_e
    - length > 64 chars → 400 MissingIdempotencyKeyException
 3. Validate body fields (Jakarta Validation):
    - description: not blank, ≤ 50 chars
-   - transactionDate: not null, valid ISO date
+   - transactionDate: not null, valid ISO 8601 datetime (YYYY-MM-DDTHH:MM:SS)
    - purchaseAmountCents: not null, ≥ 0
 4. Look up existing transaction by Idempotency-Key:
    └── found → return existing TransactionResponse with HTTP 200 (no DB write)
@@ -379,7 +388,9 @@ GET https://api.fiscaldata.treasury.gov/services/api/v1/accounting/od/rates_of_e
 1. Look up transaction by UUID
    └── not found → 404 TransactionNotFoundException
 
-2. Query Treasury API for exchange rate:
+2. Extract date from transaction datetime (`.toLocalDate()`) — Treasury API operates at day granularity
+
+3. Query Treasury API for exchange rate:
    - filter: country_currency_desc = targetCurrency
    - filter: record_date ≤ purchaseDate
    - filter: record_date ≥ purchaseDate - 6 months
@@ -388,11 +399,11 @@ GET https://api.fiscaldata.treasury.gov/services/api/v1/accounting/od/rates_of_e
    └── empty result → 422 ExchangeRateUnavailableException
    └── API error   → 422 ExchangeRateUnavailableException
 
-3. Calculate converted amount:
+4. Calculate converted amount:
       converted = purchaseAmountUsd × exchangeRate
       converted = converted.setScale(2, HALF_UP)
 
-4. Return 200 with ConvertedTransactionResponse
+5. Return 200 with ConvertedTransactionResponse
 ```
 
 ### Idempotency Flow
@@ -505,7 +516,7 @@ https://api.fiscaldata.treasury.gov/services/api/v1/accounting/od/rates_of_excha
 | `description` | `@NotBlank` | Must not be null or blank | 400 |
 | `description` | `@Size(max=50)` | Max 50 characters | 400 |
 | `transactionDate` | `@NotNull` | Must be present | 400 |
-| `transactionDate` | *(Jackson deserialization)* | Must be valid ISO date `YYYY-MM-DD` | 400 |
+| `transactionDate` | *(Jackson deserialization)* | Must be valid ISO 8601 datetime `YYYY-MM-DDTHH:MM:SS`; date-only format rejected | 400 |
 | `purchaseAmountCents` | `@NotNull` | Must be present | 400 |
 | `purchaseAmountCents` | `@Min(0)` | Must not be negative | 400 |
 
@@ -613,7 +624,11 @@ Implemented as `@RestControllerAdvice`. Handles:
 | `getTransaction_unknownId_returns404` | Unknown UUID |
 | `getTransaction_noExchangeRate_returns422` | No rate available |
 
-### Integration Tests (`@SpringBootTest` + WireMock)
+### Integration Tests (`@SpringBootTest` + Testcontainers + WireMock)
+
+Integration tests run against a **real MySQL 8.0 instance** managed by Testcontainers. Docker must be running locally. The container is started once per test class run and shared across all tests for speed. Flyway migrations execute automatically against the container on startup.
+
+WireMock stubs the Treasury API independently of the database.
 
 | Test | Covers |
 |---|---|
@@ -775,41 +790,76 @@ The live spec is auto-generated by SpringDoc from annotations and controller cod
 
 ## 16. Configuration
 
-### `application.properties`
+### Configuration Profiles
+
+| Profile | Purpose | Activation |
+|---|---|---|
+| *(default)* | Production — Aurora MySQL via environment variables | Set `DB_URL`, `DB_USERNAME`, `DB_PASSWORD` |
+| `local` | Local development — MySQL on `localhost:3306` | `SPRING_PROFILES_ACTIVE=local` |
+| `test` | Integration tests — Testcontainers MySQL (auto) | `@ActiveProfiles("test")` in test classes |
+
+### `application.properties` (Production)
+
+Credentials are never hardcoded. All sensitive values are injected via environment variables — sourced from AWS Secrets Manager or ECS task environment in production.
 
 ```properties
-# Server
-server.port=8080
+# Datasource — values injected at runtime
+spring.datasource.url=${DB_URL}
+spring.datasource.username=${DB_USERNAME}
+spring.datasource.password=${DB_PASSWORD}
+spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver
 
-# Datasource (H2 — swap for PostgreSQL in production)
-spring.datasource.url=jdbc:h2:mem:purchasedb
-spring.datasource.driver-class-name=org.h2.Driver
-spring.jpa.hibernate.ddl-auto=update
+# HikariCP — tuned for Aurora multi-AZ
+spring.datasource.hikari.maximum-pool-size=10
+spring.datasource.hikari.minimum-idle=2
+spring.datasource.hikari.connection-test-query=SELECT 1
+spring.datasource.hikari.keepalive-time=60000
 
-# H2 console (disable in production)
-spring.h2.console.enabled=true
-spring.h2.console.path=/h2-console
+# JPA — ddl-auto=none; schema managed by Flyway
+spring.jpa.database-platform=org.hibernate.dialect.MySQLDialect
+spring.jpa.hibernate.ddl-auto=none
+
+# Flyway
+spring.flyway.enabled=true
+spring.flyway.locations=classpath:db/migration
+spring.flyway.validate-on-migrate=true
 
 # Treasury API
 treasury.api.base-url=https://api.fiscaldata.treasury.gov/services/api/v1/accounting/od/rates_of_exchange
 treasury.api.connect-timeout-ms=5000
 treasury.api.read-timeout-ms=10000
 
-# Jackson
-spring.jackson.serialization.write-dates-as-timestamps=false
-spring.jackson.default-property-inclusion=non_null
+# Actuator — health check for AWS ALB
+management.endpoints.web.exposure.include=health,info
+management.health.db.enabled=true
 ```
 
-### Production Overrides (example for PostgreSQL)
+### `application-local.properties` (Local Dev)
 
 ```properties
-spring.datasource.url=jdbc:postgresql://localhost:5432/purchasedb
+spring.datasource.url=jdbc:mysql://localhost:3306/purchasedb?useSSL=false&serverTimezone=UTC
 spring.datasource.username=wex_user
-spring.datasource.password=secret
-spring.jpa.database-platform=org.hibernate.dialect.PostgreSQLDialect
-spring.jpa.hibernate.ddl-auto=validate
-spring.h2.console.enabled=false
+spring.datasource.password=wex_pass
+spring.jpa.show-sql=true
 ```
+
+Start a local MySQL with Docker:
+```bash
+docker run --name wex-mysql \
+  -e MYSQL_ROOT_PASSWORD=root \
+  -e MYSQL_DATABASE=purchasedb \
+  -e MYSQL_USER=wex_user \
+  -e MYSQL_PASSWORD=wex_pass \
+  -p 3306:3306 -d mysql:8.0
+```
+
+### Required Environment Variables (Production)
+
+| Variable | Description | Example |
+|---|---|---|
+| `DB_URL` | Aurora MySQL JDBC URL | `jdbc:mysql://cluster.rds.amazonaws.com:3306/purchasedb?useSSL=true&serverTimezone=UTC` |
+| `DB_USERNAME` | DB username | `wex_app_user` |
+| `DB_PASSWORD` | DB password (from Secrets Manager) | `***` |
 
 ---
 
@@ -819,6 +869,7 @@ spring.h2.console.enabled=false
 
 - Java 21+
 - Maven 3.8+
+- Docker (required for Testcontainers integration tests and local MySQL)
 - Git (for pre-commit hook)
 
 ### First-time Setup
@@ -831,11 +882,20 @@ cd wex-purchase-api
 git config core.hooksPath .githooks
 chmod +x .githooks/pre-commit
 
-# 3. Build, lint, test, and check coverage
+# 3. Start a local MySQL instance
+docker run --name wex-mysql \
+  -e MYSQL_ROOT_PASSWORD=root \
+  -e MYSQL_DATABASE=purchasedb \
+  -e MYSQL_USER=wex_user \
+  -e MYSQL_PASSWORD=wex_pass \
+  -p 3306:3306 -d mysql:8.0
+
+# 4. Build, lint, test, and check coverage
+#    (integration tests use Testcontainers — Docker manages the test DB automatically)
 mvn clean verify
 
-# 4. Start the server
-mvn spring-boot:run
+# 5. Start the server using the local profile
+SPRING_PROFILES_ACTIVE=local mvn spring-boot:run
 ```
 
 | URL | Description |
@@ -843,7 +903,7 @@ mvn spring-boot:run
 | `http://localhost:8080` | API base URL |
 | `http://localhost:8080/swagger-ui.html` | Swagger UI |
 | `http://localhost:8080/v3/api-docs` | Live OpenAPI JSON |
-| `http://localhost:8080/h2-console` | H2 DB console (JDBC: `jdbc:h2:mem:purchasedb`, no password) |
+| `http://localhost:8080/actuator/health` | Health check endpoint |
 
 ### Developer Command Reference
 
@@ -854,9 +914,12 @@ mvn spring-boot:run
 | Checkstyle check | `mvn checkstyle:check` |
 | Checkstyle HTML report | `mvn checkstyle:checkstyle` |
 | Coverage report | `mvn verify` → `target/site/jacoco/index.html` |
-| Start server | `mvn spring-boot:run` |
+| Start server (local) | `SPRING_PROFILES_ACTIVE=local mvn spring-boot:run` |
 | Skip coverage threshold | `mvn verify -Djacoco.line.coverage.minimum=0.0` |
 | Skip pre-commit hook | `git commit --no-verify` |
+| Run Flyway migrations | `mvn flyway:migrate` |
+| Check migration status | `mvn flyway:info` |
+| Start local MySQL (Docker) | `docker run --name wex-mysql -e MYSQL_ROOT_PASSWORD=root -e MYSQL_DATABASE=purchasedb -e MYSQL_USER=wex_user -e MYSQL_PASSWORD=wex_pass -p 3306:3306 -d mysql:8.0` |
 
 ### Quick Smoke Test
 
@@ -867,7 +930,7 @@ curl -s -X POST http://localhost:8080/api/v1/transactions \
   -H "Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000" \
   -d '{
     "description": "Office supplies",
-    "transactionDate": "2024-06-15",
+    "transactionDate": "2024-06-15T14:30:00",
     "purchaseAmountCents": 9999
   }' | jq
 
@@ -877,7 +940,7 @@ curl -s -X POST http://localhost:8080/api/v1/transactions \
   -H "Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000" \
   -d '{
     "description": "Office supplies",
-    "transactionDate": "2024-06-15",
+    "transactionDate": "2024-06-15T14:30:00",
     "purchaseAmountCents": 9999
   }' | jq
 
@@ -890,7 +953,7 @@ curl -s -X POST http://localhost:8080/api/v1/transactions \
   -H "Idempotency-Key: free-item-key-001" \
   -d '{
     "description": "Free item",
-    "transactionDate": "2024-06-15",
+    "transactionDate": "2024-06-15T14:30:00",
     "purchaseAmountCents": 0
   }' | jq
 ```
@@ -911,9 +974,15 @@ Duplicate requests return **200 OK** rather than 201 to let the client distingui
 
 Accepting `purchaseAmountCents` as a `Long` integer avoids floating-point precision issues at the API boundary. The conversion to `BigDecimal` with `scale=2` and `HALF_UP` rounding is done exactly once, inside the service, before persistence. All subsequent arithmetic (currency conversion) uses `BigDecimal` throughout.
 
-### H2 In-Memory Database
+### Aurora MySQL + Flyway
 
-H2 was chosen for zero-configuration local development and test isolation. The datasource is fully externalised via `application.properties`, so swapping to PostgreSQL or any other JPA-supported database requires only a config change — no code changes.
+Aurora MySQL was chosen as the production database for its managed availability, automatic failover, read replica support, and native MySQL compatibility. `ddl-auto=none` is enforced in all non-test profiles — schema is owned exclusively by Flyway version-controlled migrations, preventing accidental drift.
+
+HikariCP is configured with `connection-test-query=SELECT 1` and `keepalive-time` to handle Aurora's periodic failover events gracefully without connection pool exhaustion.
+
+### Testcontainers for Integration Tests
+
+Rather than using H2 (which has dialect differences from MySQL), integration tests run against a real `mysql:8.0` Docker container via Testcontainers. This ensures tests exercise the actual production database engine — including Flyway migrations, MySQL-specific type handling (`CHAR(36)` UUIDs, `DECIMAL`, `DATE`), and constraint enforcement. The container is declared `static` on the test class and reused across test methods to minimise startup overhead.
 
 ### UUID Primary Key
 

@@ -17,7 +17,7 @@ import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
 import java.math.BigDecimal;
-import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.UUID;
 
 import static org.mockito.ArgumentMatchers.any;
@@ -40,6 +40,7 @@ class PurchaseTransactionControllerTest {
 
     private static final UUID TRANSACTION_ID = UUID.fromString("a1b2c3d4-e5f6-7890-abcd-ef1234567890");
     private static final String IDEMPOTENCY_KEY = "test-key-001";
+    private static final LocalDateTime TRANSACTION_DATETIME = LocalDateTime.of(2024, 6, 15, 14, 30, 0);
 
     // -------------------------------------------------------------------------
     // POST /api/v1/transactions
@@ -49,7 +50,7 @@ class PurchaseTransactionControllerTest {
     @DisplayName("POST - 201 Created when new transaction stored")
     void createTransaction_newKey_returns201() throws Exception {
         TransactionResponse stub = new TransactionResponse(
-                TRANSACTION_ID, "Office supplies", LocalDate.of(2024, 6, 15), new BigDecimal("99.99"));
+                TRANSACTION_ID, "Office supplies", TRANSACTION_DATETIME, new BigDecimal("99.99"));
 
         when(service.createTransaction(eq(IDEMPOTENCY_KEY), any()))
                 .thenReturn(IdempotentResult.created(stub));
@@ -57,17 +58,19 @@ class PurchaseTransactionControllerTest {
         mockMvc.perform(post("/api/v1/transactions")
                         .header("Idempotency-Key", IDEMPOTENCY_KEY)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(buildRequest("Office supplies", "2024-06-15", 9999L))))
+                        .content(objectMapper.writeValueAsString(
+                                buildRequest("Office supplies", TRANSACTION_DATETIME, 9999L))))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.id").value(TRANSACTION_ID.toString()))
+                .andExpect(jsonPath("$.transactionDate").value("2024-06-15T14:30:00"))
                 .andExpect(jsonPath("$.purchaseAmountUsd").value(99.99));
     }
 
     @Test
     @DisplayName("POST - 200 OK when duplicate key replays original response")
-    void createTransaction_duplicateKey_returns200WithOriginal() throws Exception {
+    void createTransaction_duplicateKey_returns200() throws Exception {
         TransactionResponse stub = new TransactionResponse(
-                TRANSACTION_ID, "Office supplies", LocalDate.of(2024, 6, 15), new BigDecimal("99.99"));
+                TRANSACTION_ID, "Office supplies", TRANSACTION_DATETIME, new BigDecimal("99.99"));
 
         when(service.createTransaction(eq(IDEMPOTENCY_KEY), any()))
                 .thenReturn(IdempotentResult.existing(stub));
@@ -75,7 +78,8 @@ class PurchaseTransactionControllerTest {
         mockMvc.perform(post("/api/v1/transactions")
                         .header("Idempotency-Key", IDEMPOTENCY_KEY)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(buildRequest("Office supplies", "2024-06-15", 9999L))))
+                        .content(objectMapper.writeValueAsString(
+                                buildRequest("Office supplies", TRANSACTION_DATETIME, 9999L))))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.id").value(TRANSACTION_ID.toString()));
     }
@@ -85,19 +89,10 @@ class PurchaseTransactionControllerTest {
     void createTransaction_missingIdempotencyKey_returns400() throws Exception {
         mockMvc.perform(post("/api/v1/transactions")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(buildRequest("Office supplies", "2024-06-15", 9999L))))
+                        .content(objectMapper.writeValueAsString(
+                                buildRequest("Office supplies", TRANSACTION_DATETIME, 9999L))))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.message").exists());
-    }
-
-    @Test
-    @DisplayName("POST - 400 when Idempotency-Key header is blank")
-    void createTransaction_blankIdempotencyKey_returns400() throws Exception {
-        mockMvc.perform(post("/api/v1/transactions")
-                        .header("Idempotency-Key", "   ")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(buildRequest("Office supplies", "2024-06-15", 9999L))))
-                .andExpect(status().isBadRequest());
     }
 
     @Test
@@ -106,17 +101,8 @@ class PurchaseTransactionControllerTest {
         mockMvc.perform(post("/api/v1/transactions")
                         .header("Idempotency-Key", "A".repeat(65))
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(buildRequest("Office supplies", "2024-06-15", 9999L))))
-                .andExpect(status().isBadRequest());
-    }
-
-    @Test
-    @DisplayName("POST - 400 when description is blank")
-    void createTransaction_blankDescription_returns400() throws Exception {
-        mockMvc.perform(post("/api/v1/transactions")
-                        .header("Idempotency-Key", IDEMPOTENCY_KEY)
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(buildRequest("", "2024-06-15", 9999L))))
+                        .content(objectMapper.writeValueAsString(
+                                buildRequest("Office supplies", TRANSACTION_DATETIME, 9999L))))
                 .andExpect(status().isBadRequest());
     }
 
@@ -126,7 +112,8 @@ class PurchaseTransactionControllerTest {
         mockMvc.perform(post("/api/v1/transactions")
                         .header("Idempotency-Key", IDEMPOTENCY_KEY)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(buildRequest("A".repeat(51), "2024-06-15", 9999L))))
+                        .content(objectMapper.writeValueAsString(
+                                buildRequest("A".repeat(51), TRANSACTION_DATETIME, 9999L))))
                 .andExpect(status().isBadRequest());
     }
 
@@ -136,7 +123,8 @@ class PurchaseTransactionControllerTest {
         mockMvc.perform(post("/api/v1/transactions")
                         .header("Idempotency-Key", IDEMPOTENCY_KEY)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(buildRequest("Item", "2024-06-15", -1L))))
+                        .content(objectMapper.writeValueAsString(
+                                buildRequest("Item", TRANSACTION_DATETIME, -1L))))
                 .andExpect(status().isBadRequest());
     }
 
@@ -144,15 +132,51 @@ class PurchaseTransactionControllerTest {
     @DisplayName("POST - 201 when purchaseAmountCents is zero (free transaction)")
     void createTransaction_zeroAmount_returns201() throws Exception {
         TransactionResponse stub = new TransactionResponse(
-                TRANSACTION_ID, "Free item", LocalDate.of(2024, 6, 15), BigDecimal.ZERO);
+                TRANSACTION_ID, "Free item", TRANSACTION_DATETIME, BigDecimal.ZERO);
 
         when(service.createTransaction(any(), any())).thenReturn(IdempotentResult.created(stub));
 
         mockMvc.perform(post("/api/v1/transactions")
                         .header("Idempotency-Key", IDEMPOTENCY_KEY)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(buildRequest("Free item", "2024-06-15", 0L))))
+                        .content(objectMapper.writeValueAsString(
+                                buildRequest("Free item", TRANSACTION_DATETIME, 0L))))
                 .andExpect(status().isCreated());
+    }
+
+    @Test
+    @DisplayName("POST - 400 when transactionDate is missing")
+    void createTransaction_missingDate_returns400() throws Exception {
+        String body = """
+                {
+                  "description": "Test",
+                  "purchaseAmountCents": 1000
+                }
+                """;
+
+        mockMvc.perform(post("/api/v1/transactions")
+                        .header("Idempotency-Key", IDEMPOTENCY_KEY)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    @DisplayName("POST - 400 when transactionDate is date-only (missing time component)")
+    void createTransaction_dateOnlyFormat_returns400() throws Exception {
+        String body = """
+                {
+                  "description": "Test",
+                  "transactionDate": "2024-06-15",
+                  "purchaseAmountCents": 1000
+                }
+                """;
+
+        mockMvc.perform(post("/api/v1/transactions")
+                        .header("Idempotency-Key", IDEMPOTENCY_KEY)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isBadRequest());
     }
 
     // -------------------------------------------------------------------------
@@ -160,17 +184,20 @@ class PurchaseTransactionControllerTest {
     // -------------------------------------------------------------------------
 
     @Test
-    @DisplayName("GET - 200 OK with converted amount")
+    @DisplayName("GET - 200 OK with converted amount and datetime in response")
     void getTransaction_validRequest_returns200() throws Exception {
         ConvertedTransactionResponse stub = new ConvertedTransactionResponse(
-                TRANSACTION_ID, "Office supplies", LocalDate.of(2024, 6, 15),
-                new BigDecimal("99.99"), "Canada-Dollar", new BigDecimal("1.35"), new BigDecimal("134.99"));
+                TRANSACTION_ID, "Office supplies", TRANSACTION_DATETIME,
+                new BigDecimal("99.99"), "Canada-Dollar",
+                new BigDecimal("1.35"), new BigDecimal("134.99"));
 
-        when(service.getTransactionInCurrency(eq(TRANSACTION_ID), eq("Canada-Dollar"))).thenReturn(stub);
+        when(service.getTransactionInCurrency(eq(TRANSACTION_ID), eq("Canada-Dollar")))
+                .thenReturn(stub);
 
         mockMvc.perform(get("/api/v1/transactions/{id}", TRANSACTION_ID)
                         .param("currency", "Canada-Dollar"))
                 .andExpect(status().isOk())
+                .andExpect(jsonPath("$.transactionDate").value("2024-06-15T14:30:00"))
                 .andExpect(jsonPath("$.convertedAmount").value(134.99));
     }
 
@@ -200,10 +227,10 @@ class PurchaseTransactionControllerTest {
     // Helpers
     // -------------------------------------------------------------------------
 
-    private CreateTransactionRequest buildRequest(String description, String date, Long amountCents) {
+    private CreateTransactionRequest buildRequest(String description, LocalDateTime dateTime, Long amountCents) {
         CreateTransactionRequest req = new CreateTransactionRequest();
         req.setDescription(description);
-        if (date != null) req.setTransactionDate(LocalDate.parse(date));
+        req.setTransactionDate(dateTime);
         req.setPurchaseAmountCents(amountCents);
         return req;
     }

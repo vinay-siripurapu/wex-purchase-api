@@ -34,12 +34,11 @@ public class PurchaseTransactionService {
      *
      * @param idempotencyKey client-supplied unique key for this request
      * @param request        transaction details
-     * @return the stored (or previously stored) transaction; boolean indicates if newly created
+     * @return the stored (or previously stored) transaction and whether it was newly created
      */
     @Transactional
     public IdempotentResult<TransactionResponse> createTransaction(String idempotencyKey,
                                                                     CreateTransactionRequest request) {
-        // Check for an existing transaction with this idempotency key
         return repository.findByIdempotencyKey(idempotencyKey)
                 .map(existing -> IdempotentResult.existing(toResponse(existing)))
                 .orElseGet(() -> {
@@ -59,6 +58,8 @@ public class PurchaseTransactionService {
 
     /**
      * Retrieves a transaction by ID and returns it converted to the specified currency.
+     * The exchange rate lookup uses the date portion of the transaction datetime,
+     * as the Treasury API operates at day granularity.
      *
      * @param id                  transaction UUID
      * @param countryCurrencyDesc target currency label, e.g. "Canada-Dollar"
@@ -69,8 +70,9 @@ public class PurchaseTransactionService {
                 .orElseThrow(() -> new TransactionNotFoundException(
                         "Purchase transaction not found for id: " + id));
 
+        // Treasury API works at date granularity — extract date from the datetime
         BigDecimal exchangeRate = exchangeRateService.getExchangeRate(
-                countryCurrencyDesc, transaction.getTransactionDate());
+                countryCurrencyDesc, transaction.getTransactionDate().toLocalDate());
 
         BigDecimal convertedAmount = transaction.getPurchaseAmount()
                 .multiply(exchangeRate)

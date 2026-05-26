@@ -1,14 +1,14 @@
 package com.wex.purchase.dto;
 
 import java.math.BigDecimal;
-import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.UUID;
 
 public class ConvertedTransactionResponse {
 
     private UUID id;
     private String description;
-    private LocalDate transactionDate;
+    private LocalDateTime transactionDate;
     private BigDecimal purchaseAmountUsd;
     private String targetCurrency;
     private BigDecimal exchangeRate;
@@ -16,7 +16,7 @@ public class ConvertedTransactionResponse {
 
     public ConvertedTransactionResponse() {}
 
-    public ConvertedTransactionResponse(UUID id, String description, LocalDate transactionDate,
+    public ConvertedTransactionResponse(UUID id, String description, LocalDateTime transactionDate,
                                         BigDecimal purchaseAmountUsd, String targetCurrency,
                                         BigDecimal exchangeRate, BigDecimal convertedAmount) {
         this.id = id;
@@ -36,8 +36,8 @@ public class ConvertedTransactionResponse {
     public String getDescription() { return description; }
     public void setDescription(String description) { this.description = description; }
 
-    public LocalDate getTransactionDate() { return transactionDate; }
-    public void setTransactionDate(LocalDate transactionDate) { this.transactionDate = transactionDate; }
+    public LocalDateTime getTransactionDate() { return transactionDate; }
+    public void setTransactionDate(LocalDateTime transactionDate) { this.transactionDate = transactionDate; }
 
     public BigDecimal getPurchaseAmountUsd() { return purchaseAmountUsd; }
     public void setPurchaseAmountUsd(BigDecimal purchaseAmountUsd) { this.purchaseAmountUsd = purchaseAmountUsd; }

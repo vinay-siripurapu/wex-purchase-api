@@ -2,7 +2,7 @@ package com.wex.purchase.dto;
 
 import jakarta.validation.constraints.*;
 
-import java.time.LocalDate;
+import java.time.LocalDateTime;
 
 public class CreateTransactionRequest {
 
@@ -10,8 +10,8 @@ public class CreateTransactionRequest {
     @Size(max = 50, message = "Description must not exceed 50 characters")
     private String description;
 
-    @NotNull(message = "Transaction date is required")
-    private LocalDate transactionDate;
+    @NotNull(message = "Transaction date and time is required")
+    private LocalDateTime transactionDate;
 
     /**
      * Purchase amount in cents (last 2 digits are cents).
@@ -26,8 +26,8 @@ public class CreateTransactionRequest {
     public String getDescription() { return description; }
     public void setDescription(String description) { this.description = description; }
 
-    public LocalDate getTransactionDate() { return transactionDate; }
-    public void setTransactionDate(LocalDate transactionDate) { this.transactionDate = transactionDate; }
+    public LocalDateTime getTransactionDate() { return transactionDate; }
+    public void setTransactionDate(LocalDateTime transactionDate) { this.transactionDate = transactionDate; }
 
     public Long getPurchaseAmountCents() { return purchaseAmountCents; }
     public void setPurchaseAmountCents(Long purchaseAmountCents) { this.purchaseAmountCents = purchaseAmountCents; }

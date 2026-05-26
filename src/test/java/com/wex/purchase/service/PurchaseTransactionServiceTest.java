@@ -18,6 +18,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -38,6 +39,7 @@ class PurchaseTransactionServiceTest {
     private PurchaseTransactionService service;
 
     private PurchaseTransaction savedTransaction;
+    private static final LocalDateTime TRANSACTION_DATETIME = LocalDateTime.of(2024, 6, 15, 14, 30, 0);
 
     @BeforeEach
     void setUp() {
@@ -45,18 +47,18 @@ class PurchaseTransactionServiceTest {
         savedTransaction.setId(UUID.randomUUID());
         savedTransaction.setIdempotencyKey("key-001");
         savedTransaction.setDescription("Office supplies");
-        savedTransaction.setTransactionDate(LocalDate.of(2024, 6, 15));
+        savedTransaction.setTransactionDate(TRANSACTION_DATETIME);
         savedTransaction.setPurchaseAmount(new BigDecimal("100.00"));
     }
 
     // -------------------------------------------------------------------------
-    // createTransaction — new transaction
+    // createTransaction
     // -------------------------------------------------------------------------
 
     @Test
     @DisplayName("createTransaction: stores and returns a new transaction (created=true)")
     void createTransaction_newKey_createsAndReturns() {
-        CreateTransactionRequest request = buildRequest("Office supplies", LocalDate.of(2024, 6, 15), 10000L);
+        CreateTransactionRequest request = buildRequest("Office supplies", TRANSACTION_DATETIME, 10000L);
 
         when(repository.findByIdempotencyKey("key-001")).thenReturn(Optional.empty());
         when(repository.save(any(PurchaseTransaction.class))).thenReturn(savedTransaction);
@@ -66,13 +68,14 @@ class PurchaseTransactionServiceTest {
         assertThat(result.created()).isTrue();
         assertThat(result.value().getDescription()).isEqualTo("Office supplies");
         assertThat(result.value().getPurchaseAmountUsd()).isEqualByComparingTo("100.00");
+        assertThat(result.value().getTransactionDate()).isEqualTo(TRANSACTION_DATETIME);
         verify(repository).save(any(PurchaseTransaction.class));
     }
 
     @Test
     @DisplayName("createTransaction: returns existing transaction for duplicate key (created=false)")
     void createTransaction_duplicateKey_returnsExistingWithoutSaving() {
-        CreateTransactionRequest request = buildRequest("Office supplies", LocalDate.of(2024, 6, 15), 10000L);
+        CreateTransactionRequest request = buildRequest("Office supplies", TRANSACTION_DATETIME, 10000L);
 
         when(repository.findByIdempotencyKey("key-001")).thenReturn(Optional.of(savedTransaction));
 
@@ -86,12 +89,12 @@ class PurchaseTransactionServiceTest {
     @Test
     @DisplayName("createTransaction: converts cents to dollars correctly (9999 → 99.99)")
     void createTransaction_convertsCentsToDollars() {
-        CreateTransactionRequest request = buildRequest("Test item", LocalDate.now(), 9999L);
+        CreateTransactionRequest request = buildRequest("Test item", LocalDateTime.now(), 9999L);
 
         PurchaseTransaction stored = new PurchaseTransaction();
         stored.setId(UUID.randomUUID());
         stored.setDescription("Test item");
-        stored.setTransactionDate(LocalDate.now());
+        stored.setTransactionDate(LocalDateTime.now());
         stored.setPurchaseAmount(new BigDecimal("99.99"));
 
         when(repository.findByIdempotencyKey(anyString())).thenReturn(Optional.empty());
@@ -105,12 +108,12 @@ class PurchaseTransactionServiceTest {
     @Test
     @DisplayName("createTransaction: 1 cent → $0.01")
     void createTransaction_oneCent_convertsCorrectly() {
-        CreateTransactionRequest request = buildRequest("Tiny", LocalDate.now(), 1L);
+        CreateTransactionRequest request = buildRequest("Tiny", LocalDateTime.now(), 1L);
 
         PurchaseTransaction stored = new PurchaseTransaction();
         stored.setId(UUID.randomUUID());
         stored.setDescription("Tiny");
-        stored.setTransactionDate(LocalDate.now());
+        stored.setTransactionDate(LocalDateTime.now());
         stored.setPurchaseAmount(new BigDecimal("0.01"));
 
         when(repository.findByIdempotencyKey(anyString())).thenReturn(Optional.empty());
@@ -126,17 +129,33 @@ class PurchaseTransactionServiceTest {
     // -------------------------------------------------------------------------
 
     @Test
+    @DisplayName("getTransactionInCurrency: extracts date from datetime for Treasury API lookup")
+    void getTransactionInCurrency_extractsDateFromDatetime() {
+        UUID id = savedTransaction.getId();
+        when(repository.findById(id)).thenReturn(Optional.of(savedTransaction));
+        when(exchangeRateService.getExchangeRate(eq("Canada-Dollar"), eq(LocalDate.of(2024, 6, 15))))
+                .thenReturn(new BigDecimal("1.3500"));
+
+        ConvertedTransactionResponse response = service.getTransactionInCurrency(id, "Canada-Dollar");
+
+        // Verify date extracted correctly from 2024-06-15T14:30:00
+        verify(exchangeRateService).getExchangeRate("Canada-Dollar", LocalDate.of(2024, 6, 15));
+        assertThat(response.getTransactionDate()).isEqualTo(TRANSACTION_DATETIME);
+    }
+
+    @Test
     @DisplayName("getTransactionInCurrency: converts USD amount using exchange rate")
     void getTransactionInCurrency_validRequest_returnsConvertedAmount() {
         UUID id = savedTransaction.getId();
         when(repository.findById(id)).thenReturn(Optional.of(savedTransaction));
-        when(exchangeRateService.getExchangeRate("Canada-Dollar", savedTransaction.getTransactionDate()))
+        when(exchangeRateService.getExchangeRate(eq("Canada-Dollar"), any(LocalDate.class)))
                 .thenReturn(new BigDecimal("1.3500"));
 
         ConvertedTransactionResponse response = service.getTransactionInCurrency(id, "Canada-Dollar");
 
         assertThat(response.getExchangeRate()).isEqualByComparingTo("1.3500");
         assertThat(response.getConvertedAmount()).isEqualByComparingTo("135.00");
+        assertThat(response.getTargetCurrency()).isEqualTo("Canada-Dollar");
     }
 
     @Test
@@ -146,10 +165,12 @@ class PurchaseTransactionServiceTest {
         UUID id = savedTransaction.getId();
 
         when(repository.findById(id)).thenReturn(Optional.of(savedTransaction));
-        when(exchangeRateService.getExchangeRate(anyString(), any())).thenReturn(new BigDecimal("1.2345"));
+        when(exchangeRateService.getExchangeRate(anyString(), any(LocalDate.class)))
+                .thenReturn(new BigDecimal("1.2345"));
 
         ConvertedTransactionResponse response = service.getTransactionInCurrency(id, "Some-Currency");
 
+        // 10.00 * 1.2345 = 12.345 → rounds to 12.35
         assertThat(response.getConvertedAmount()).isEqualByComparingTo("12.35");
     }
 
@@ -168,7 +189,7 @@ class PurchaseTransactionServiceTest {
     void getTransactionInCurrency_noRateAvailable_throwsExchangeRateException() {
         UUID id = savedTransaction.getId();
         when(repository.findById(id)).thenReturn(Optional.of(savedTransaction));
-        when(exchangeRateService.getExchangeRate(anyString(), any()))
+        when(exchangeRateService.getExchangeRate(anyString(), any(LocalDate.class)))
                 .thenThrow(new ExchangeRateUnavailableException("No rate available"));
 
         assertThatThrownBy(() -> service.getTransactionInCurrency(id, "Nonexistent-Currency"))
@@ -179,10 +200,10 @@ class PurchaseTransactionServiceTest {
     // Helpers
     // -------------------------------------------------------------------------
 
-    private CreateTransactionRequest buildRequest(String description, LocalDate date, Long amountCents) {
+    private CreateTransactionRequest buildRequest(String description, LocalDateTime dateTime, Long amountCents) {
         CreateTransactionRequest req = new CreateTransactionRequest();
         req.setDescription(description);
-        req.setTransactionDate(date);
+        req.setTransactionDate(dateTime);
         req.setPurchaseAmountCents(amountCents);
         return req;
     }

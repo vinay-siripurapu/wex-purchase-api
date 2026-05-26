@@ -3,9 +3,9 @@ title: WEX Purchase Transaction API — Data Model
 ---
 erDiagram
     PURCHASE_TRANSACTIONS {
-        VARCHAR_36  id                PK  "UUID, auto-generated (Java)"
-        VARCHAR_64  idempotency_key   UK  "Unique, client-supplied per request"
-        VARCHAR_50  description           "Max 50 chars, not null"
-        DATE        transaction_date      "ISO date, not null"
-        DECIMAL_17_2 purchase_amount      "Stored in USD (cents / 100), not null"
+        CHAR_36      id                PK  "UUID, auto-generated (Java)"
+        VARCHAR_64   idempotency_key   UK  "Unique, client-supplied per request"
+        VARCHAR_50   description           "Max 50 chars, not null"
+        DATETIME     transaction_date      "Full timestamp (date + time), UTC, not null"
+        DECIMAL_17_2 purchase_amount       "Stored in USD (cents / 100), not null"
     }

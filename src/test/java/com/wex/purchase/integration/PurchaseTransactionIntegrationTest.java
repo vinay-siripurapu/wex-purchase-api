@@ -14,18 +14,30 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
+import org.testcontainers.containers.MySQLContainer;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
 
-import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.UUID;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.*;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @AutoConfigureMockMvc
 @ActiveProfiles("test")
+@Testcontainers
 class PurchaseTransactionIntegrationTest {
+
+    @Container
+    static MySQLContainer<?> mysql = new MySQLContainer<>("mysql:8.0")
+            .withDatabaseName("purchasedb")
+            .withUsername("wex_user")
+            .withPassword("wex_pass")
+            .withReuse(true);
 
     private static WireMockServer wireMockServer;
 
@@ -52,66 +64,60 @@ class PurchaseTransactionIntegrationTest {
     }
 
     @DynamicPropertySource
-    static void overrideTreasuryUrl(DynamicPropertyRegistry registry) {
-        registry.add("treasury.api.base-url", () -> "http://localhost:" + wireMockServer.port());
+    static void overrideProperties(DynamicPropertyRegistry registry) {
+        registry.add("spring.datasource.url", mysql::getJdbcUrl);
+        registry.add("spring.datasource.username", mysql::getUsername);
+        registry.add("spring.datasource.password", mysql::getPassword);
+        registry.add("treasury.api.base-url",
+                () -> "http://localhost:" + wireMockServer.port());
     }
 
-    // -------------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────
     // Idempotency
-    // -------------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────
 
     @Test
     @DisplayName("Integration: duplicate Idempotency-Key returns 200 with original, no duplicate stored")
     void duplicateIdempotencyKey_returns200AndOriginalTransaction() throws Exception {
-        String idempotencyKey = UUID.randomUUID().toString();
-        String body = objectMapper.writeValueAsString(buildRequest("Duplicate test", LocalDate.now(), 5000L));
+        String key = UUID.randomUUID().toString();
+        String body = objectMapper.writeValueAsString(
+                buildRequest("Duplicate test", LocalDateTime.now(), 5000L));
 
-        // First request → 201
         MvcResult first = mockMvc.perform(post("/api/v1/transactions")
-                        .header("Idempotency-Key", idempotencyKey)
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(body))
-                .andExpect(status().isCreated())
-                .andReturn();
+                        .header("Idempotency-Key", key)
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isCreated()).andReturn();
 
         String firstId = objectMapper.readTree(first.getResponse().getContentAsString()).get("id").asText();
 
-        // Second request with same key → 200 with same id
         MvcResult second = mockMvc.perform(post("/api/v1/transactions")
-                        .header("Idempotency-Key", idempotencyKey)
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(body))
-                .andExpect(status().isOk())
-                .andReturn();
+                        .header("Idempotency-Key", key)
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk()).andReturn();
 
         String secondId = objectMapper.readTree(second.getResponse().getContentAsString()).get("id").asText();
-
-        org.assertj.core.api.Assertions.assertThat(firstId).isEqualTo(secondId);
+        assertThat(firstId).isEqualTo(secondId);
     }
 
     @Test
     @DisplayName("Integration: different Idempotency-Keys create separate transactions")
     void differentIdempotencyKeys_createSeparateTransactions() throws Exception {
-        String body = objectMapper.writeValueAsString(buildRequest("Same data", LocalDate.now(), 1000L));
+        String body = objectMapper.writeValueAsString(
+                buildRequest("Same data", LocalDateTime.now(), 1000L));
 
         MvcResult first = mockMvc.perform(post("/api/v1/transactions")
                         .header("Idempotency-Key", UUID.randomUUID().toString())
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(body))
-                .andExpect(status().isCreated())
-                .andReturn();
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isCreated()).andReturn();
 
         MvcResult second = mockMvc.perform(post("/api/v1/transactions")
                         .header("Idempotency-Key", UUID.randomUUID().toString())
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(body))
-                .andExpect(status().isCreated())
-                .andReturn();
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isCreated()).andReturn();
 
         String firstId = objectMapper.readTree(first.getResponse().getContentAsString()).get("id").asText();
         String secondId = objectMapper.readTree(second.getResponse().getContentAsString()).get("id").asText();
-
-        org.assertj.core.api.Assertions.assertThat(firstId).isNotEqualTo(secondId);
+        assertThat(firstId).isNotEqualTo(secondId);
     }
 
     @Test
@@ -119,26 +125,30 @@ class PurchaseTransactionIntegrationTest {
     void missingIdempotencyKey_returns400() throws Exception {
         mockMvc.perform(post("/api/v1/transactions")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(buildRequest("No key", LocalDate.now(), 1000L))))
+                        .content(objectMapper.writeValueAsString(
+                                buildRequest("No key", LocalDateTime.now(), 1000L))))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.message").exists());
     }
 
-    // -------------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────
     // Happy path
-    // -------------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────
 
     @Test
     @DisplayName("Integration: store then retrieve with currency conversion")
     void storeThenRetrieveWithConversion_returnsConvertedAmount() throws Exception {
-        CreateTransactionRequest req = buildRequest("Office supplies", LocalDate.of(2024, 3, 15), 20000L);
+        // transaction on 2024-03-15 at 09:15 — date portion used for Treasury API
+        LocalDateTime txDateTime = LocalDateTime.of(2024, 3, 15, 9, 15, 0);
 
         MvcResult createResult = mockMvc.perform(post("/api/v1/transactions")
                         .header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(req)))
+                        .content(objectMapper.writeValueAsString(
+                                buildRequest("Office supplies", txDateTime, 20000L))))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.purchaseAmountUsd").value(200.00))
+                .andExpect(jsonPath("$.transactionDate").value("2024-03-15T09:15:00"))
                 .andReturn();
 
         String id = objectMapper.readTree(createResult.getResponse().getContentAsString()).get("id").asText();
@@ -157,26 +167,27 @@ class PurchaseTransactionIntegrationTest {
                                 }
                                 """)));
 
-        mockMvc.perform(get("/api/v1/transactions/{id}", id)
-                        .param("currency", "Canada-Dollar"))
+        // 200.00 * 1.35 = 270.00
+        mockMvc.perform(get("/api/v1/transactions/{id}", id).param("currency", "Canada-Dollar"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.convertedAmount").value(270.00))
-                .andExpect(jsonPath("$.exchangeRate").value(1.35));
+                .andExpect(jsonPath("$.purchaseAmountUsd").value(200.00))
+                .andExpect(jsonPath("$.transactionDate").value("2024-03-15T09:15:00"))
+                .andExpect(jsonPath("$.exchangeRate").value(1.35))
+                .andExpect(jsonPath("$.convertedAmount").value(270.00));
     }
 
-    // -------------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────
     // Validation
-    // -------------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────
 
     @Test
     @DisplayName("Integration: description over 50 chars returns 400")
     void storeTransaction_descriptionTooLong_returns400() throws Exception {
-        CreateTransactionRequest req = buildRequest("A".repeat(51), LocalDate.now(), 1000L);
-
         mockMvc.perform(post("/api/v1/transactions")
                         .header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(req)))
+                        .content(objectMapper.writeValueAsString(
+                                buildRequest("A".repeat(51), LocalDateTime.now(), 1000L))))
                 .andExpect(status().isBadRequest());
     }
 
@@ -186,7 +197,8 @@ class PurchaseTransactionIntegrationTest {
         mockMvc.perform(post("/api/v1/transactions")
                         .header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(buildRequest("Free item", LocalDate.now(), 0L))))
+                        .content(objectMapper.writeValueAsString(
+                                buildRequest("Free item", LocalDateTime.now(), 0L))))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.purchaseAmountUsd").value(0.00));
     }
@@ -197,31 +209,30 @@ class PurchaseTransactionIntegrationTest {
         mockMvc.perform(post("/api/v1/transactions")
                         .header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(buildRequest("Negative", LocalDate.now(), -500L))))
+                        .content(objectMapper.writeValueAsString(
+                                buildRequest("Negative", LocalDateTime.now(), -500L))))
                 .andExpect(status().isBadRequest());
     }
 
     @Test
-    @DisplayName("Integration: invalid date format returns 400")
-    void storeTransaction_invalidDateFormat_returns400() throws Exception {
-        String body = """
-                {
-                  "description": "Test",
-                  "transactionDate": "15/06/2024",
-                  "purchaseAmountCents": 1000
-                }
-                """;
-
+    @DisplayName("Integration: date-only format rejected — datetime required")
+    void storeTransaction_dateOnlyFormat_returns400() throws Exception {
         mockMvc.perform(post("/api/v1/transactions")
                         .header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(body))
+                        .content("""
+                                {
+                                  "description": "Test",
+                                  "transactionDate": "2024-06-15",
+                                  "purchaseAmountCents": 1000
+                                }
+                                """))
                 .andExpect(status().isBadRequest());
     }
 
-    // -------------------------------------------------------------------------
-    // Currency edge cases
-    // -------------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────
+    // Currency conversion edge cases
+    // ─────────────────────────────────────────────────────────────────────
 
     @Test
     @DisplayName("Integration: no exchange rate within 6 months returns 422")
@@ -229,9 +240,9 @@ class PurchaseTransactionIntegrationTest {
         MvcResult createResult = mockMvc.perform(post("/api/v1/transactions")
                         .header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(buildRequest("Old purchase", LocalDate.of(2023, 1, 10), 5000L))))
-                .andExpect(status().isCreated())
-                .andReturn();
+                        .content(objectMapper.writeValueAsString(
+                                buildRequest("Old purchase", LocalDateTime.of(2023, 1, 10, 12, 0), 5000L))))
+                .andExpect(status().isCreated()).andReturn();
 
         String id = objectMapper.readTree(createResult.getResponse().getContentAsString()).get("id").asText();
 
@@ -240,9 +251,9 @@ class PurchaseTransactionIntegrationTest {
                         .withHeader("Content-Type", "application/json")
                         .withBody("{\"data\": []}")));
 
-        mockMvc.perform(get("/api/v1/transactions/{id}", id)
-                        .param("currency", "Canada-Dollar"))
-                .andExpect(status().isUnprocessableEntity());
+        mockMvc.perform(get("/api/v1/transactions/{id}", id).param("currency", "Canada-Dollar"))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.message").exists());
     }
 
     @Test
@@ -259,9 +270,9 @@ class PurchaseTransactionIntegrationTest {
         MvcResult createResult = mockMvc.perform(post("/api/v1/transactions")
                         .header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(buildRequest("Rounding test", LocalDate.of(2024, 6, 1), 1000L))))
-                .andExpect(status().isCreated())
-                .andReturn();
+                        .content(objectMapper.writeValueAsString(
+                                buildRequest("Rounding test", LocalDateTime.of(2024, 6, 1, 10, 0), 1000L))))
+                .andExpect(status().isCreated()).andReturn();
 
         String id = objectMapper.readTree(createResult.getResponse().getContentAsString()).get("id").asText();
 
@@ -269,7 +280,9 @@ class PurchaseTransactionIntegrationTest {
                 .willReturn(aResponse().withStatus(200)
                         .withHeader("Content-Type", "application/json")
                         .withBody("""
-                                {"data": [{"country_currency_desc": "X", "exchange_rate": "1.2345", "record_date": "2024-05-15"}]}
+                                {"data": [{"country_currency_desc": "X",
+                                           "exchange_rate": "1.2345",
+                                           "record_date": "2024-05-15"}]}
                                 """)));
 
         // 10.00 * 1.2345 = 12.345 → 12.35
@@ -278,14 +291,14 @@ class PurchaseTransactionIntegrationTest {
                 .andExpect(jsonPath("$.convertedAmount").value(12.35));
     }
 
-    // -------------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────
     // Helpers
-    // -------------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────
 
-    private CreateTransactionRequest buildRequest(String description, LocalDate date, Long amountCents) {
+    private CreateTransactionRequest buildRequest(String description, LocalDateTime dateTime, Long amountCents) {
         CreateTransactionRequest req = new CreateTransactionRequest();
         req.setDescription(description);
-        req.setTransactionDate(date);
+        req.setTransactionDate(dateTime);
         req.setPurchaseAmountCents(amountCents);
         return req;
     }

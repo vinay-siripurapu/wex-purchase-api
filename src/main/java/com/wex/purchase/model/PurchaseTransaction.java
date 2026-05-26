@@ -3,7 +3,7 @@ package com.wex.purchase.model;
 import jakarta.persistence.*;
 
 import java.math.BigDecimal;
-import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.UUID;
 
 @Entity
@@ -11,19 +11,31 @@ import java.util.UUID;
        uniqueConstraints = @UniqueConstraint(name = "uc_idempotency_key", columnNames = "idempotency_key"))
 public class PurchaseTransaction {
 
+    /**
+     * UUID stored as CHAR(36) — compatible with Aurora MySQL.
+     * Generated in Java (not DB) for portability and test predictability.
+     */
     @Id
-    @Column(nullable = false, updatable = false)
+    @Column(name = "id", nullable = false, updatable = false, columnDefinition = "CHAR(36)")
     private UUID id;
 
     @Column(name = "idempotency_key", nullable = false, updatable = false, length = 64)
     private String idempotencyKey;
 
-    @Column(nullable = false, length = 50)
+    @Column(name = "description", nullable = false, length = 50)
     private String description;
 
+    /**
+     * Full timestamp of the purchase (date + time).
+     * Stored as DATETIME in Aurora MySQL — no timezone info, UTC expected from caller.
+     */
     @Column(name = "transaction_date", nullable = false)
-    private LocalDate transactionDate;
+    private LocalDateTime transactionDate;
 
+    /**
+     * Stored in US dollars with exactly 2 decimal places.
+     * Input is accepted in cents and converted before persistence.
+     */
     @Column(name = "purchase_amount", nullable = false, precision = 17, scale = 2)
     private BigDecimal purchaseAmount;
 
@@ -45,8 +57,8 @@ public class PurchaseTransaction {
     public String getDescription() { return description; }
     public void setDescription(String description) { this.description = description; }
 
-    public LocalDate getTransactionDate() { return transactionDate; }
-    public void setTransactionDate(LocalDate transactionDate) { this.transactionDate = transactionDate; }
+    public LocalDateTime getTransactionDate() { return transactionDate; }
+    public void setTransactionDate(LocalDateTime transactionDate) { this.transactionDate = transactionDate; }
 
     public BigDecimal getPurchaseAmount() { return purchaseAmount; }
     public void setPurchaseAmount(BigDecimal purchaseAmount) { this.purchaseAmount = purchaseAmount; }
