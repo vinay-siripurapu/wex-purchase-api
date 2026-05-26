@@ -34,7 +34,7 @@ public class PurchaseTransaction {
 
     /**
      * Stored in US dollars with exactly 2 decimal places.
-     * Input is accepted in cents and converted before persistence.
+     * Input is accepted in USD and stored with exactly 2 decimal places.
      */
     @Column(name = "purchase_amount", nullable = false, precision = 17, scale = 2)
     private BigDecimal purchaseAmount;

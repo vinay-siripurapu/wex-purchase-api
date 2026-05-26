@@ -46,10 +46,9 @@ public class PurchaseTransactionService {
                     transaction.setIdempotencyKey(idempotencyKey);
                     transaction.setDescription(request.getDescription());
                     transaction.setTransactionDate(request.getTransactionDate());
-                    // Convert cents to dollars: 9999 → 99.99
-                    BigDecimal amountInDollars = BigDecimal.valueOf(request.getPurchaseAmountCents())
-                            .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
-                    transaction.setPurchaseAmount(amountInDollars);
+                    // Enforce 2 decimal places (nearest cent) on store
+                    transaction.setPurchaseAmount(
+                            request.getPurchaseAmountUsd().setScale(2, RoundingMode.HALF_UP));
 
                     PurchaseTransaction saved = repository.save(transaction);
                     return IdempotentResult.created(toResponse(saved));

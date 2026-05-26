@@ -7,5 +7,5 @@ erDiagram
         VARCHAR_64   idempotency_key   UK  "Unique, client-supplied per request"
         VARCHAR_50   description           "Max 50 chars, not null"
         DATETIME     transaction_date      "Full timestamp (date + time), UTC, not null"
-        DECIMAL_17_2 purchase_amount       "Stored in USD (cents / 100), not null"
+        DECIMAL_17_2 purchase_amount       "Stored in USD, 2 decimal places, not null"
     }

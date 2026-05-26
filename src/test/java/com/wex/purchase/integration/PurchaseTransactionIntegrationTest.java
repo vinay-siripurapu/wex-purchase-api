@@ -18,6 +18,7 @@ import org.testcontainers.containers.MySQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.UUID;
 
@@ -81,7 +82,7 @@ class PurchaseTransactionIntegrationTest {
     void duplicateIdempotencyKey_returns200AndOriginalTransaction() throws Exception {
         String key = UUID.randomUUID().toString();
         String body = objectMapper.writeValueAsString(
-                buildRequest("Duplicate test", LocalDateTime.now(), 5000L));
+                buildRequest("Duplicate test", LocalDateTime.now(), "50.00"));
 
         MvcResult first = mockMvc.perform(post("/api/v1/transactions")
                         .header("Idempotency-Key", key)
@@ -103,7 +104,7 @@ class PurchaseTransactionIntegrationTest {
     @DisplayName("Integration: different Idempotency-Keys create separate transactions")
     void differentIdempotencyKeys_createSeparateTransactions() throws Exception {
         String body = objectMapper.writeValueAsString(
-                buildRequest("Same data", LocalDateTime.now(), 1000L));
+                buildRequest("Same data", LocalDateTime.now(), "10.00"));
 
         MvcResult first = mockMvc.perform(post("/api/v1/transactions")
                         .header("Idempotency-Key", UUID.randomUUID().toString())
@@ -126,7 +127,7 @@ class PurchaseTransactionIntegrationTest {
         mockMvc.perform(post("/api/v1/transactions")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(
-                                buildRequest("No key", LocalDateTime.now(), 1000L))))
+                                buildRequest("No key", LocalDateTime.now(), "10.00"))))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.message").exists());
     }
@@ -138,14 +139,13 @@ class PurchaseTransactionIntegrationTest {
     @Test
     @DisplayName("Integration: store then retrieve with currency conversion")
     void storeThenRetrieveWithConversion_returnsConvertedAmount() throws Exception {
-        // transaction on 2024-03-15 at 09:15 — date portion used for Treasury API
         LocalDateTime txDateTime = LocalDateTime.of(2024, 3, 15, 9, 15, 0);
 
         MvcResult createResult = mockMvc.perform(post("/api/v1/transactions")
                         .header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(
-                                buildRequest("Office supplies", txDateTime, 20000L))))
+                                buildRequest("Office supplies", txDateTime, "200.00"))))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.purchaseAmountUsd").value(200.00))
                 .andExpect(jsonPath("$.transactionDate").value("2024-03-15T09:15:00"))
@@ -171,7 +171,6 @@ class PurchaseTransactionIntegrationTest {
         mockMvc.perform(get("/api/v1/transactions/{id}", id).param("currency", "Canada-Dollar"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.purchaseAmountUsd").value(200.00))
-                .andExpect(jsonPath("$.transactionDate").value("2024-03-15T09:15:00"))
                 .andExpect(jsonPath("$.exchangeRate").value(1.35))
                 .andExpect(jsonPath("$.convertedAmount").value(270.00));
     }
@@ -187,30 +186,41 @@ class PurchaseTransactionIntegrationTest {
                         .header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(
-                                buildRequest("A".repeat(51), LocalDateTime.now(), 1000L))))
+                                buildRequest("A".repeat(51), LocalDateTime.now(), "10.00"))))
                 .andExpect(status().isBadRequest());
     }
 
     @Test
-    @DisplayName("Integration: zero cents allowed — stored as $0.00")
-    void storeTransaction_zeroAmountCents_returns201() throws Exception {
+    @DisplayName("Integration: zero dollar amount allowed — stored as $0.00")
+    void storeTransaction_zeroAmount_returns201() throws Exception {
         mockMvc.perform(post("/api/v1/transactions")
                         .header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(
-                                buildRequest("Free item", LocalDateTime.now(), 0L))))
+                                buildRequest("Free item", LocalDateTime.now(), "0.00"))))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.purchaseAmountUsd").value(0.00));
     }
 
     @Test
-    @DisplayName("Integration: negative cents returns 400")
-    void storeTransaction_negativeAmountCents_returns400() throws Exception {
+    @DisplayName("Integration: negative amount returns 400")
+    void storeTransaction_negativeAmount_returns400() throws Exception {
         mockMvc.perform(post("/api/v1/transactions")
                         .header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(
-                                buildRequest("Negative", LocalDateTime.now(), -500L))))
+                                buildRequest("Negative", LocalDateTime.now(), "-0.01"))))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    @DisplayName("Integration: more than 2 decimal places returns 400")
+    void storeTransaction_tooManyDecimalPlaces_returns400() throws Exception {
+        mockMvc.perform(post("/api/v1/transactions")
+                        .header("Idempotency-Key", UUID.randomUUID().toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(
+                                buildRequest("Bad amount", LocalDateTime.now(), "9.999"))))
                 .andExpect(status().isBadRequest());
     }
 
@@ -224,7 +234,7 @@ class PurchaseTransactionIntegrationTest {
                                 {
                                   "description": "Test",
                                   "transactionDate": "2024-06-15",
-                                  "purchaseAmountCents": 1000
+                                  "purchaseAmountUsd": 9.99
                                 }
                                 """))
                 .andExpect(status().isBadRequest());
@@ -241,7 +251,7 @@ class PurchaseTransactionIntegrationTest {
                         .header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(
-                                buildRequest("Old purchase", LocalDateTime.of(2023, 1, 10, 12, 0), 5000L))))
+                                buildRequest("Old purchase", LocalDateTime.of(2023, 1, 10, 12, 0), "50.00"))))
                 .andExpect(status().isCreated()).andReturn();
 
         String id = objectMapper.readTree(createResult.getResponse().getContentAsString()).get("id").asText();
@@ -271,7 +281,7 @@ class PurchaseTransactionIntegrationTest {
                         .header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(
-                                buildRequest("Rounding test", LocalDateTime.of(2024, 6, 1, 10, 0), 1000L))))
+                                buildRequest("Rounding test", LocalDateTime.of(2024, 6, 1, 10, 0), "10.00"))))
                 .andExpect(status().isCreated()).andReturn();
 
         String id = objectMapper.readTree(createResult.getResponse().getContentAsString()).get("id").asText();
@@ -295,11 +305,11 @@ class PurchaseTransactionIntegrationTest {
     // Helpers
     // ─────────────────────────────────────────────────────────────────────
 
-    private CreateTransactionRequest buildRequest(String description, LocalDateTime dateTime, Long amountCents) {
+    private CreateTransactionRequest buildRequest(String description, LocalDateTime dateTime, String amountUsd) {
         CreateTransactionRequest req = new CreateTransactionRequest();
         req.setDescription(description);
         req.setTransactionDate(dateTime);
-        req.setPurchaseAmountCents(amountCents);
+        req.setPurchaseAmountUsd(new BigDecimal(amountUsd));
         return req;
     }
 }

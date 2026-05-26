@@ -102,7 +102,7 @@ Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
 {
   "description": "Office supplies",
   "transactionDate": "2024-06-15T14:30:00",
-  "purchaseAmountCents": 9999
+  "purchaseAmountUsd": 99.99
 }
 ```
 
@@ -111,7 +111,7 @@ Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
 | `Idempotency-Key` | Header (string) | Required, max 64 chars |
 | `description` | string | Required, max 50 characters |
 | `transactionDate` | datetime | Required, `YYYY-MM-DDTHH:MM:SS` (time component required) |
-| `purchaseAmountCents` | long | Required, non-negative; `9999` = $99.99, `0` = $0.00 |
+| `purchaseAmountUsd` | decimal | Required, non-negative, max 2 decimal places; `99.99` = $99.99, `0.00` = $0.00 |
 
 Response `201 Created` (new) / `200 OK` (duplicate key replayed):
 ```json

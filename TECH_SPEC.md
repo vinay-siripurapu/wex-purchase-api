@@ -1,6 +1,6 @@
 # WEX Purchase Transaction API — Technical Specification
 
-**Version:** 1.4.0
+**Version:** 1.5.0
 **Language:** Java 21
 **Framework:** Spring Boot 3.2.x
 **Last Updated:** 2025-05-25
@@ -50,7 +50,7 @@ The service is built for production readiness: validated inputs, idempotent writ
 | `Idempotency-Key` | Header (String) | Required, max 64 characters; prevents duplicate transactions |
 | `description` | String | Required, max 50 characters |
 | `transactionDate` | Date | Required, ISO format `YYYY-MM-DD` |
-| `purchaseAmountCents` | Long | Required, non-negative integer (cents); e.g. `9999` = $99.99, `0` = $0.00 |
+| `purchaseAmountUsd` | BigDecimal | Required, non-negative, max 2 decimal places; e.g. `99.99` = $99.99, `0.00` = $0.00 |
 | `id` | UUID | Auto-generated on store; uniquely identifies the transaction |
 
 ### Requirement 2 — Retrieve a Transaction in a Target Currency
@@ -211,7 +211,7 @@ wex-purchase-api/
 - `id` is generated in Java via `UUID.randomUUID()` inside `@PrePersist`, not by the database. Stored as `CHAR(36)` in Aurora MySQL — avoids binary UUID complexity while remaining portable.
 - `idempotency_key` has a `UNIQUE` database constraint (`uc_idempotency_key`) enforcing deduplication at the storage level as a safety net, in addition to the application-level check.
 - `purchase_amount` is always stored in **US dollars** with exactly 2 decimal places, regardless of how the client submits the value.
-- The `purchaseAmountCents` field exists only in the request DTO; it is converted to dollars before persistence.
+- `purchase_amount` is stored as a `DECIMAL(17,2)` in USD. The value is scaled to exactly 2 decimal places before persistence.
 - `transaction_date` is stored as `DATETIME` (not `DATE`) to preserve the full purchase timestamp. Callers are expected to supply UTC. The date portion is extracted (`.toLocalDate()`) when querying the Treasury API, which operates at day granularity.
 
 ### Entity-Relationship Diagram
@@ -223,22 +223,22 @@ erDiagram
         VARCHAR_64   idempotency_key   UK  "Unique, client-supplied per request"
         VARCHAR_50   description           "Max 50 chars, not null"
         DATETIME     transaction_date      "Full timestamp (date + time), UTC, not null"
-        DECIMAL_17_2 purchase_amount       "Stored in USD (cents / 100), not null"
+        DECIMAL_17_2 purchase_amount       "Stored in USD, 2 decimal places, not null"
     }
 ```
 
 Full source: [`docs/datamodel.mermaid`](./docs/datamodel.mermaid)
 
-### Cents → Dollars Conversion
+### Amount Precision
+
+`purchaseAmountUsd` is stored with exactly 2 decimal places using `RoundingMode.HALF_UP`:
 
 ```
-storedAmount = BigDecimal.valueOf(purchaseAmountCents) / 100
-             = 9999 / 100 = 99.99
-             = 0    / 100 = 0.00
-             = 1    / 100 = 0.01
+stored = purchaseAmountUsd.setScale(2, HALF_UP)
+       = 99.99  → 99.99
+       = 0.00   → 0.00
+       = 9.999  → rejected by @Digits(fraction=2) before reaching service
 ```
-
-Scale is explicitly set to 2 with `RoundingMode.HALF_UP` to guarantee no precision surprises from integer division.
 
 ---
 
@@ -266,7 +266,7 @@ Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
 {
   "description": "Office supplies",
   "transactionDate": "2024-06-15T14:30:00",
-  "purchaseAmountCents": 9999
+  "purchaseAmountUsd": 99.99
 }
 ```
 
@@ -282,7 +282,7 @@ Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
 |---|---|---|---|
 | `description` | `string` | Yes | Max 50 characters, not blank |
 | `transactionDate` | `string` | Yes | ISO 8601 datetime `YYYY-MM-DDTHH:MM:SS` (time component required) |
-| `purchaseAmountCents` | `long` | Yes | Non-negative integer; `0` = $0.00 |
+| `purchaseAmountUsd` | `decimal` | Yes | Non-negative, max 2 decimal places; `0.00` = $0.00 |
 
 **Response — 201 Created** *(new transaction)*
 
@@ -304,7 +304,7 @@ Same response body as 201, but HTTP status is 200 to signal the transaction alre
 | `id` | Auto-generated UUID; use this to retrieve the transaction |
 | `description` | Echo of the submitted description |
 | `transactionDate` | Echo of the submitted date |
-| `purchaseAmountUsd` | Stored dollar amount (cents input divided by 100) |
+| `purchaseAmountUsd` | Stored dollar amount in USD (as submitted) |
 
 ---
 
@@ -373,11 +373,10 @@ GET https://api.fiscaldata.treasury.gov/services/api/v1/accounting/od/rates_of_e
 3. Validate body fields (Jakarta Validation):
    - description: not blank, ≤ 50 chars
    - transactionDate: not null, valid ISO 8601 datetime (YYYY-MM-DDTHH:MM:SS)
-   - purchaseAmountCents: not null, ≥ 0
+   - purchaseAmountUsd: not null, ≥ 0.00, max 2 decimal places
 4. Look up existing transaction by Idempotency-Key:
    └── found → return existing TransactionResponse with HTTP 200 (no DB write)
-5. Convert cents to dollars:
-      dollars = BigDecimal.valueOf(cents).divide(100, 2, HALF_UP)
+5. Scale purchaseAmountUsd to exactly 2 decimal places (HALF_UP)
 6. Persist new PurchaseTransaction entity (UUID auto-assigned)
 7. Return 201 Created with TransactionResponse
 ```
@@ -517,8 +516,9 @@ https://api.fiscaldata.treasury.gov/services/api/v1/accounting/od/rates_of_excha
 | `description` | `@Size(max=50)` | Max 50 characters | 400 |
 | `transactionDate` | `@NotNull` | Must be present | 400 |
 | `transactionDate` | *(Jackson deserialization)* | Must be valid ISO 8601 datetime `YYYY-MM-DDTHH:MM:SS`; date-only format rejected | 400 |
-| `purchaseAmountCents` | `@NotNull` | Must be present | 400 |
-| `purchaseAmountCents` | `@Min(0)` | Must not be negative | 400 |
+| `purchaseAmountUsd` | `@NotNull` | Must be present | 400 |
+| `purchaseAmountUsd` | `@DecimalMin("0.00")` | Must not be negative | 400 |
+| `purchaseAmountUsd` | `@Digits(fraction=2)` | At most 2 decimal places | 400 |
 
 ### Path / Query Parameters
 
@@ -591,8 +591,8 @@ Implemented as `@RestControllerAdvice`. Handles:
 |---|---|
 | `createTransaction_newKey_createsAndReturns` | Happy path store, `created=true` |
 | `createTransaction_duplicateKey_returnsExistingWithoutSaving` | Duplicate key → no DB write, `created=false` |
-| `createTransaction_convertsCentsToDollars` | 9999 → 99.99 conversion |
-| `createTransaction_oneCent_convertsCorrectly` | Edge case: 1 cent → $0.01 |
+| `createTransaction_roundsToTwoDecimalPlaces` | Amount scaled to 2dp before storage |
+| `createTransaction_zeroAmount_stored` | Edge case: 0.00 stored correctly |
 | `getTransactionInCurrency_validRequest_returnsConvertedAmount` | Happy path retrieve + convert |
 | `getTransactionInCurrency_roundsConvertedAmount` | 12.345 → 12.35 rounding |
 | `getTransactionInCurrency_unknownId_throwsNotFoundException` | 404 path |
@@ -619,6 +619,7 @@ Implemented as `@RestControllerAdvice`. Handles:
 | `createTransaction_blankDescription_returns400` | Blank description |
 | `createTransaction_descriptionTooLong_returns400` | 51+ char description |
 | `createTransaction_zeroAmount_returns201` | $0.00 free transaction |
+| `createTransaction_tooManyDecimalPlaces_returns400` | 3+ decimal places rejected |
 | `createTransaction_negativeAmount_returns400` | Negative cents |
 | `getTransaction_validRequest_returns200` | Happy path GET |
 | `getTransaction_unknownId_returns404` | Unknown UUID |
@@ -637,8 +638,8 @@ WireMock stubs the Treasury API independently of the database.
 | `missingIdempotencyKey_returns400` | Missing header in full context |
 | `storeThenRetrieveWithConversion_returnsConvertedAmount` | Full store → retrieve → convert flow |
 | `storeTransaction_descriptionTooLong_returns400` | Validation in full context |
-| `storeTransaction_zeroAmountCents_returns201` | $0.00 in full context |
-| `storeTransaction_negativeAmountCents_returns400` | Negative in full context |
+| `storeTransaction_zeroAmount_returns201` | $0.00 in full context |
+| `storeTransaction_negativeAmount_returns400` | Negative amount rejected |
 | `storeTransaction_invalidDateFormat_returns400` | Bad date format |
 | `retrieveTransaction_noRateWithinSixMonths_returns422` | Empty Treasury stub |
 | `retrieveTransaction_unknownId_returns404` | Missing transaction |
@@ -931,7 +932,7 @@ curl -s -X POST http://localhost:8080/api/v1/transactions \
   -d '{
     "description": "Office supplies",
     "transactionDate": "2024-06-15T14:30:00",
-    "purchaseAmountCents": 9999
+    "purchaseAmountUsd": 99.99
   }' | jq
 
 # Replay same key — 200 OK, same id, no duplicate
@@ -941,7 +942,7 @@ curl -s -X POST http://localhost:8080/api/v1/transactions \
   -d '{
     "description": "Office supplies",
     "transactionDate": "2024-06-15T14:30:00",
-    "purchaseAmountCents": 9999
+    "purchaseAmountUsd": 99.99
   }' | jq
 
 # Retrieve with currency conversion (replace {id})
@@ -954,7 +955,7 @@ curl -s -X POST http://localhost:8080/api/v1/transactions \
   -d '{
     "description": "Free item",
     "transactionDate": "2024-06-15T14:30:00",
-    "purchaseAmountCents": 0
+    "purchaseAmountUsd": 0.00
   }' | jq
 ```
 
@@ -970,9 +971,11 @@ The application checks for an existing key before inserting (application-level i
 
 Duplicate requests return **200 OK** rather than 201 to let the client distinguish a new creation from a replayed response. The body is identical in both cases.
 
-### Cents as Input Format
+### Consistent USD Format Across Request and Response
 
-Accepting `purchaseAmountCents` as a `Long` integer avoids floating-point precision issues at the API boundary. The conversion to `BigDecimal` with `scale=2` and `HALF_UP` rounding is done exactly once, inside the service, before persistence. All subsequent arithmetic (currency conversion) uses `BigDecimal` throughout.
+Both the request (`purchaseAmountUsd`) and all responses (`purchaseAmountUsd`, `convertedAmount`) use US dollar decimal values. This gives API consumers a consistent, self-explanatory contract — no mental conversion between cents integers and dollar decimals.
+
+Floating-point precision is handled by using `BigDecimal` throughout: `@Digits(fraction=2)` rejects input with more than 2 decimal places at the validation layer, and `.setScale(2, HALF_UP)` is applied before persistence to ensure exact 2dp storage regardless of how Jackson deserializes the JSON number. All currency conversion arithmetic uses `BigDecimal.multiply()` with `HALF_UP` rounding.
 
 ### Aurora MySQL + Flyway
 

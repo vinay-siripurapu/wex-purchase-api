@@ -61,13 +61,13 @@ paths:
                 value:
                   description: Office supplies
                   transactionDate: "2024-06-15T14:30:00"
-                  purchaseAmountCents: 9999
+                  purchaseAmountUsd: 99.99
               free:
                 summary: Free / zero-dollar transaction
                 value:
                   description: Promotional item
                   transactionDate: "2024-06-15T14:30:00"
-                  purchaseAmountCents: 0
+                  purchaseAmountUsd: 0.00
       responses:
         '201':
           description: Transaction created successfully
@@ -216,7 +216,7 @@ components:
       required:
         - description
         - transactionDate
-        - purchaseAmountCents
+        - purchaseAmountUsd
       properties:
         description:
           type: string
@@ -228,14 +228,16 @@ components:
           format: date-time
           description: Date of the purchase in ISO 8601 datetime format (YYYY-MM-DDTHH:MM:SS)
           example: "2024-06-15T14:30:00"
-        purchaseAmountCents:
-          type: integer
-          format: int64
-          minimum: 0
+        purchaseAmountUsd:
+          type: number
+          format: double
+          minimum: 0.00
+          multipleOf: 0.01
           description: |
-            Purchase amount in US cents. The last two digits represent cents.
-            Examples: `9999` = $99.99, `100` = $1.00, `0` = $0.00.
-          example: 9999
+            Purchase amount in US dollars, rounded to the nearest cent (2 decimal places).
+            Examples: `99.99` = $99.99, `1.00` = $1.00, `0.00` = $0.00.
+            Values with more than 2 decimal places are rejected.
+          example: 99.99
 
     TransactionResponse:
       type: object
@@ -255,7 +257,7 @@ components:
         purchaseAmountUsd:
           type: number
           format: double
-          description: Purchase amount in US dollars (converted from cents input)
+          description: Purchase amount in US dollars as submitted in the request
           example: 99.99
 
     ConvertedTransactionResponse:

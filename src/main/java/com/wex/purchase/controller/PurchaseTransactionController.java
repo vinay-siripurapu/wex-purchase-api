@@ -42,7 +42,7 @@ public class PurchaseTransactionController {
      * returned with HTTP 200 instead of 201, and no duplicate is created.
      *
      * @param idempotencyKey client-generated unique key for this request
-     * @param request        JSON body with description, transactionDate, purchaseAmountCents
+     * @param request        JSON body with description, transactionDate, purchaseAmountUsd
      * @return 201 Created (new) or 200 OK (duplicate — original returned)
      */
     @PostMapping
